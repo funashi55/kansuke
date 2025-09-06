@@ -6,29 +6,76 @@
     <title>日程投票フォーム</title>
     <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
     <style>
-      body{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans JP', sans-serif; margin: 16px; }
-      .option{ display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #eee; }
-      .label{ flex: 1; }
-      .choices{ display:flex; gap:10px; }
-      .tally{ font-size: 12px; color:#666; }
-      .header{ margin-bottom: 12px; }
-      .save{ margin-top: 12px; padding: 10px 16px; background:#00c300; color:#fff; border:none; border-radius:6px; font-weight:bold; }
-      .disabled{ background:#ccc !important; }
-      .row{ margin-bottom:8px; }
-      .error{ color:#b00020; }
+      :root{
+        --bg:#0b0c0f;
+        --card:#14161a;
+        --muted:#8a8f98;
+        --text:#e6e8eb;
+        --line:#23262d;
+        --accent:#00c300;
+        --yes:#1db954;   /* green */
+        --maybe:#ffb020; /* amber */
+        --no:#ef5350;    /* red */
+      }
+      @media (prefers-color-scheme: light){
+        :root{
+          --bg:#f6f7f9; --card:#ffffff; --muted:#5c636f; --text:#16181d; --line:#e6e8eb; --accent:#00b800;
+        }
+      }
+      *{ box-sizing: border-box; }
+      body{
+        font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans JP',sans-serif;
+        margin:0; background:var(--bg); color:var(--text);
+      }
+      .container{ max-width:880px; margin:0 auto; padding:20px 16px 88px; }
+      .card{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; box-shadow: 0 6px 20px rgba(0,0,0,.12); }
+      .header{ display:flex; align-items:baseline; gap:12px; margin-bottom:10px; }
+      #title{ margin:0; font-size:20px; line-height:1.3; }
+      .badge{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:rgba(255,255,255,.06); color:var(--muted); font-size:12px; border:1px solid var(--line); }
+      #user{ color:var(--muted); font-size:12px; }
+      .legend{ display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px; margin:6px 0 2px; }
+      .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; border:1px solid var(--line); background:rgba(255,255,255,.04); font-size:12px; color:var(--muted); }
+      .list{ margin-top:8px; }
+      .option{ display:grid; grid-template-columns: 1fr auto auto; gap:12px; align-items:center; padding:12px 0; border-bottom:1px solid var(--line); }
+      .label{ font-weight:600; letter-spacing:.2px; }
+      .choices{ display:flex; gap:8px; }
+      /* Radio as segmented chips */
+      .choices input[type=radio]{ position:absolute; opacity:0; pointer-events:none; }
+      .choice{ display:inline-flex; align-items:center; justify-content:center; min-width:40px; padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:rgba(255,255,255,.02); color:var(--muted); font-weight:600; cursor:pointer; user-select:none; transition:all .15s ease; }
+      .choice.yes{ border-color: color-mix(in oklab, var(--yes) 40%, var(--line)); color: var(--yes); }
+      .choice.maybe{ border-color: color-mix(in oklab, var(--maybe) 40%, var(--line)); color: var(--maybe); }
+      .choice.no{ border-color: color-mix(in oklab, var(--no) 40%, var(--line)); color: var(--no); }
+      .choices input[type=radio]:checked + .choice{ background: rgba(255,255,255,.06); border-color: currentColor; box-shadow: inset 0 0 0 1px currentColor; color:#fff; }
+      .choices input[type=radio]:disabled + .choice{ opacity:.5; cursor:not-allowed; }
+      .tally{ font-size:12px; color:var(--muted); text-align:right; white-space:nowrap; }
+      /* Save bar */
+      .savebar{ position:sticky; bottom:0; left:0; right:0; backdrop-filter: blur(10px); background: linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,.25)); padding:14px 0 0; margin-top:10px; }
+      .save{ width:100%; padding:12px 16px; background:var(--accent); color:#fff; border:none; border-radius:10px; font-weight:800; letter-spacing:.4px; box-shadow: 0 8px 16px rgba(0,195,0,.25); }
+      .save.disabled, .save:disabled{ background:#8d949a; box-shadow:none; cursor:not-allowed; }
+      .row{ margin-top:8px; font-size:13px; }
+      .error{ color:#ff6b6b; }
     </style>
   </head>
   <body>
-    <div class="header">
-      <h3 id="title">日程投票</h3>
-      <div id="deadline" class="tally"></div>
-      <div id="user" class="tally"></div>
+    <div class="container">
+      <div class="card">
+        <div class="header">
+          <h3 id="title">日程投票</h3>
+          <span id="deadline" class="badge">締切: -</span>
+        </div>
+        <div id="user" class="legend"></div>
+        <div class="legend">
+          <span class="pill">○ 賛成</span>
+          <span class="pill">△ どちらでも</span>
+          <span class="pill">× 不可</span>
+        </div>
+        <div id="list" class="list"></div>
+        <div class="savebar">
+          <button id="save" class="save">保存</button>
+          <div id="msg" class="row"></div>
+        </div>
+      </div>
     </div>
-
-    <div id="list"></div>
-
-    <button id="save" class="save">保存</button>
-    <div id="msg" class="row"></div>
 
     <script type="module">
       let LIFF_ID = (window.__LIFF_ID__ || '').trim();
@@ -55,6 +102,7 @@
 
       let idToken = null;
       let state = { options: [], tally: [], userChoices: [] };
+      let pollClosed = false;
 
       function choiceName(n){ return n===2?'○':n===1?'△':'×'; }
 
@@ -75,11 +123,13 @@
             r.name = opt.id;
             r.value = String(val);
             r.id = id;
+            if (pollClosed) r.disabled = true;
             const mine = state.userChoices.find(c => c.option_id === opt.id);
             if (mine && String(mine.choice) === String(val)) r.checked = true;
             const l = document.createElement('label');
             l.htmlFor = id;
             l.textContent = choiceName(val);
+            l.className = 'choice ' + (val===2?'yes':val===1?'maybe':'no');
             choices.appendChild(r);
             choices.appendChild(l);
           });
@@ -152,6 +202,7 @@
           return;
         }
         const data = await res.json();
+        pollClosed = data?.poll?.status && data.poll.status !== 'open';
         state = { options: data.options, tally: data.tally, userChoices: data.userChoices };
         document.getElementById('title').textContent = data.poll.title;
         const dl = document.getElementById('deadline');
@@ -160,6 +211,15 @@
           dl.textContent = `締切: ${d.toLocaleString('ja-JP')}`;
         } else dl.textContent = '';
         document.getElementById('user').textContent = `あなた: ${data.user?.name || ''}`;
+        if (pollClosed){
+          $msg.innerHTML = '<span class="tally">この投票は終了しました。</span>';
+          $save.classList.add('disabled');
+          $save.disabled = true;
+        } else {
+          $msg.textContent = '';
+          $save.classList.remove('disabled');
+          $save.disabled = false;
+        }
         render();
       }
 

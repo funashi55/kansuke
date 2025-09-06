@@ -31,8 +31,6 @@ const db = initDB();
 // LINE client and webhook
 const client = new line.Client({ channelAccessToken: config.channelAccessToken });
 const runtime = { botUserId: process.env.BOT_USER_ID || '' };
-const DEBUG_CLOSE = process.env.DEBUG_CLOSE === '1';
-const dlog = (...args) => { if (DEBUG_CLOSE) console.log('[CLOSE_DEBUG]', ...args); };
 const promptedClosePolls = new Set();
 // Try to fetch bot's userId automatically (so BOT_USER_ID env is optional)
 (async () => {
@@ -138,14 +136,12 @@ app.post('/api/polls/:pollId/votes3', async (req, res) => {
     }
     const uid = login.sub;
     const name = login.name || null;
-    dlog('votes3: incoming', { pollId, uid, name, choicesLen: Array.isArray(req.body?.choices) ? req.body.choices.length : 0 });
     const { poll } = db.getPoll(pollId) || {};
     if (!poll) return res.status(404).json({ error: 'not_found' });
     if (poll.status !== 'open') return res.status(403).json({ error: 'poll_closed' });
     if (poll.deadline && Date.now() > Number(poll.deadline)) return res.status(403).json({ error: 'deadline_passed' });
     const choices = Array.isArray(req.body?.choices) ? req.body.choices : [];
     db.upsertVotes3({ pollId, userId: uid, userName: name, choices });
-    dlog('votes3: saved', { pollId, uid, savedCount: choices.length });
     const tally3 = db.getPollTally3(pollId);
     publish(pollId, { type: 'tally', tally: tally3 });
     // Check completion and possibly prompt to close
@@ -201,12 +197,10 @@ async function getAllMemberIds(groupOrRoomId) {
   // Try group first, then room. SDK v9 returns string[] directly (pagination handled internally).
   try {
     const ids = await client.getGroupMemberIds(groupOrRoomId);
-    dlog('getGroupMemberIds', { groupOrRoomId, count: Array.isArray(ids) ? ids.length : 0 });
     if (Array.isArray(ids) && ids.length) return ids;
   } catch (_) {}
   try {
     const ids = await client.getRoomMemberIds(groupOrRoomId);
-    dlog('getRoomMemberIds', { groupOrRoomId, count: Array.isArray(ids) ? ids.length : 0 });
     if (Array.isArray(ids) && ids.length) return ids;
   } catch (_) {}
   return [];
@@ -217,14 +211,12 @@ async function getHumanMemberCount(groupOrRoomId) {
   try {
     const res = await client.getGroupMembersCount(groupOrRoomId);
     if (res && typeof res.count === 'number') {
-      dlog('getGroupMembersCount', { groupOrRoomId, count: res.count });
       return res.count;
     }
   } catch (_) {}
   try {
     const res = await client.getRoomMembersCount(groupOrRoomId);
     if (res && typeof res.count === 'number') {
-      dlog('getRoomMembersCount', { groupOrRoomId, count: res.count });
       return res.count;
     }
   } catch (_) {}
@@ -238,7 +230,6 @@ async function checkAndPromptClose({ pollId }) {
   if (!poll || poll.status !== 'open') return;
   if (promptedClosePolls.has(pollId)) return; // avoid spamming
   if (!poll.group_id) return;
-  dlog('checkAndPromptClose:start', { pollId, group_id: poll.group_id, options: options.length });
   const nOpts = options.length;
   if (nOpts === 0) return;
   // まずはメンバーの総数（Bot除外済みの人数）が取得できるか試す
@@ -251,41 +242,23 @@ async function checkAndPromptClose({ pollId }) {
   if (typeof memberCount === 'number' && memberCount > 0) {
     // 公式の人数と「全候補を埋めたユーザー数」を比較
     allAnswered = completedUsers.length >= memberCount;
-    dlog('count-check', { memberCount, completedUsers: completedUsers.length, nOpts });
   } else {
     // 旧来のIDベース（取得できる場合）
     const memberIds = await getAllMemberIds(poll.group_id);
     if (!memberIds || memberIds.length === 0) {
-      dlog('no-member-ids', { group_id: poll.group_id });
+      // no-op
     }
     humanIds = memberIds.filter((id) => id && id !== runtime.botUserId);
-    if (memberIds.length) dlog('members', { total: memberIds.length, humans: humanIds.length, botUserId: runtime.botUserId });
     allAnswered = humanIds.length > 0 && humanIds.every((uid) => (byUser.get(uid) || 0) >= nOpts);
     // さらにダメなら最終フォールバック（投票に参加した人全員が完了 && 2人以上）
     if (!allAnswered) {
       const voters = counts.map((r) => r.user_id).filter(Boolean);
       const uniqueVoters = Array.from(new Set(voters));
       const votersAllDone = uniqueVoters.length > 0 && uniqueVoters.every((uid) => (byUser.get(uid) || 0) >= nOpts);
-      dlog('fallback-voters', { uniqueVoters: uniqueVoters.length, votersAllDone, nOpts });
       if (votersAllDone && uniqueVoters.length >= 2) {
         allAnswered = true;
       }
     }
-  }
-  if (!allAnswered) {
-    if (humanIds) {
-      const missing = humanIds.filter((uid) => (byUser.get(uid) || 0) < nOpts);
-      dlog('not-all-answered', {
-        nOpts,
-        counts,
-        missingCount: missing.length,
-        missingSample: missing.slice(0, 5),
-      });
-    } else {
-      dlog('not-all-answered', { nOpts, completedUsers: completedUsers.length, memberCount });
-    }
-  } else {
-    dlog('all-answered', { nHumans: humanIds ? humanIds.length : memberCount, nOpts });
   }
   if (!allAnswered) return;
 
@@ -307,7 +280,6 @@ async function checkAndPromptClose({ pollId }) {
   try {
     await client.pushMessage(poll.group_id, messages);
     promptedClosePolls.add(pollId);
-    dlog('pushed-confirm', { pollId });
   } catch (e) {
     console.warn('push confirm failed', e?.response?.data || e.message);
   }
