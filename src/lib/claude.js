@@ -29,6 +29,7 @@ export async function extractCandidateDatesWithMeta(query) {
 Rules:
 - Timezone: Asia/Tokyo
 - Today: ${dayjs().format('YYYY-MM-DD')}
+- Examples: "9/5, 9/9", "10/1-10/11の土日"
 - Prefer upcoming/future dates but do not guess; avoid speculative inference.
 - Output strictly JSON array: [{"date":"YYYY-MM-DD","label":"M/D(曜)"}, ...]
 - Use Japanese weekday like (月)(火)(水)(木)(金)(土)(日)
@@ -139,7 +140,7 @@ export async function runWithTools({ sessionId, userText, now = dayjs(), titleHi
   const system = `あなたは日本語のスケジューリングアシスタントです。ユーザーの意図を理解し、
 1) まず丁寧・簡潔な返信文を考えます。
 2) ユーザーが\"明確に\"日付を指定している場合に限り、ツール update_event_candidates を呼び出します。
-   - 明確の基準: YYYY-MM-DD, M/D, M/D-M/D, 10月5日, 10/1-10/11 の土日 など、解釈が一意に定まる表現。
+   - 明確の基準: 「9/5, 9/9」のような複数の日付、「10/1-10/11の土日」のような範囲指定、解釈が一意に定まる表現。
    - 曖昧な表現（\"来月\"、\"そのうち\"、文脈不足など）の場合は絶対にツールを呼び出さないこと。
    - 曜日や\"今週末/来週末\"など相対的な表現は、今日が ${now.format('YYYY-MM-DD')} である前提で一意に定まる場合のみ許可。
 3) ツールを呼び出さない場合は、日付の提示を促す確認メッセージを短く返します（具体例: 10/5, 10/12 や 10/1-10/11 の土日 など）。
@@ -211,6 +212,7 @@ async function geminiExtractCandidates(query) {
 ルール:
 - タイムゾーン: Asia/Tokyo
 - 今日: ${dayjs().format('YYYY-MM-DD')}
+- 例: 「9/5, 9/9」や「10/1-10/11の土日」
 - 未来寄りに解釈。ただし不確かな推測はしない（想像で補完しない）。
 - 形式: [{"date":"YYYY-MM-DD","label":"M/D(曜)"}, ...]
 - 最大30件、日付昇順。

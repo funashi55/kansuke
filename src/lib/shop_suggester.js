@@ -430,7 +430,7 @@ async function optimizeResultsWithClaude({ query, candidates, model = DEFAULT_CL
   const user = [
     '次の候補から最大 maxReturn 件を、ユーザー満足度が高くなる順に並べ替えてください。',
     '重視: 指定時刻に営業中、評価値、レビュー件数、予算適合、ジャンル適合。',
-    '短い理由も付けてください。',
+    '理由も付けてください。',
     'JSONのみで返してください。',
     '{',
     '  "recommendations": [',
