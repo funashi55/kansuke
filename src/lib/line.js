@@ -67,7 +67,8 @@ async function handleTextMessage({ client, db, event, botUserId }) {
   if (latestPoll && latestPoll.follow_up_state === 'question_sent' && !looksLikeScheduleRequest(query)) {
     try {
       await safeReply(client, replyToken, [{ type: 'text', text: 'お店を検索中です...少々お待ちください。' }]);
-      const results = await suggestPlacesFromNL(query, { date: latestPoll.date });
+      const date = latestPoll.finalized_date ? `${latestPoll.finalized_date} 19:00` : null;
+      const results = await suggestPlacesFromNL(query, { date });
       const recommendations = results?.top5_structured?.recommendations;
       if (recommendations && recommendations.length > 0) {
         const flexMessage = buildShopCarousel(recommendations, { altText: `「${query}」のおすすめのお店` });
@@ -272,6 +273,7 @@ async function handlePostback({ client, db, event }) {
       const opt = options.find((o) => o.id === optionId);
       if (!opt) throw new Error('option_not_found');
       db.setPollStatus(pollId, 'closed');
+      db.setPollFinalizedDate(pollId, opt.date);
       const text = `「${poll.title}」は ${opt.label} に確定しました。`; 
       // Notify group
       if (poll.group_id) {

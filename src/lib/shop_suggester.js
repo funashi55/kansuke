@@ -191,6 +191,13 @@ function priceLevelIndicativeYen(priceLevel) {
   }
 }
 
+function inYenRange(priceLevel, rangeMin, rangeMax) {
+  if (priceLevel == null) return false;
+  const band = priceLevelIndicativeYen(priceLevel);
+  if (!band) return false;
+  return !(band.max < rangeMin || band.min > rangeMax);
+}
+
 // ------------------------- Validation/Sanitization --------- 
 function sanitizeNLPlan(raw) {
   const out = {
@@ -237,7 +244,7 @@ async function googleGet(path, params) {
 }
 
 // ------------------------- Claude API ---------------------
-async function claudeMessagesJson({ system, user, model = DEFAULT_CLAUDE_MODEL, max_tokens = 512, temperature = 0 }) {
+async function claudeMessagesJson({ system, user, model = DEFAULT_CLAUDE_MODEL, max_tokens = 30000, temperature = 0 }) {
   const apiKey = getAnthropicKey();
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -272,10 +279,12 @@ async function geminiGenerateJson({ system, user, model = DEFAULT_GEMINI_MODEL, 
   const apiKey = getGeminiKey();
   if (!apiKey) throw new Error('GOOGLE_API_KEY (or GEMINI_API_KEY) is not set');
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  
+  const fullPrompt = `${system}\n\n${user}`;
+
   const body = {
-    systemInstruction: { role: 'system', parts: [{ text: system }] },
     contents: [
-      { role: 'user', parts: [{ text: user }] }
+      { role: 'user', parts: [{ text: fullPrompt }] }
     ],
     generationConfig: {
       temperature,
@@ -284,7 +293,9 @@ async function geminiGenerateJson({ system, user, model = DEFAULT_GEMINI_MODEL, 
       ...(responseSchema ? { responseSchema } : {}),
     },
   };
+
   const res = await fetch(endpoint, {
+
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -319,7 +330,7 @@ async function geminiGenerateJson({ system, user, model = DEFAULT_GEMINI_MODEL, 
 }
 
 // ---------------- Summarize final top via LLM ----------------
-async function summarizeTopWithClaude({ system, user, model = DEFAULT_CLAUDE_MODEL, max_tokens = 512, temperature = 0 }) {
+async function summarizeTopWithClaude({ system, user, model = DEFAULT_CLAUDE_MODEL, max_tokens = 30000, temperature = 0 }) {
   const apiKey = getAnthropicKey();
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -450,7 +461,7 @@ async function parseUserQueryWithClaude(nl, { model = DEFAULT_CLAUDE_MODEL } = {
     '',
     `ユーザー入力: ${nl}`,
   ].join('\n');
-  return claudeMessagesJson({ system, user, model, max_tokens: 512, temperature: 0 });
+  return claudeMessagesJson({ system, user, model, max_tokens: 30000, temperature: 0 });
 }
 
 async function parseUserQueryWithGemini(nl, { model = DEFAULT_GEMINI_MODEL } = {}) {
@@ -482,7 +493,7 @@ async function parseUserQueryWithGemini(nl, { model = DEFAULT_GEMINI_MODEL } = {
       openAtStrict: { type: 'BOOLEAN' },
     },
   };
-  const json = await geminiGenerateJson({ system, user, model, maxOutputTokens: 512, temperature: 0, responseSchema });
+  const json = await geminiGenerateJson({ system, user, model, maxOutputTokens: 30000, temperature: 0, responseSchema });
   return json;
 }
 
@@ -750,6 +761,34 @@ async function findPlaceStation(text, biasLat, biasLng, { language = DEFAULT_LAN
   };
 }
 
+async function nearbyStations(lat, lng, { language = DEFAULT_LANGUAGE, radius = DEFAULT_STATION_SEARCH_RADIUS_M } = {}) {
+  const types = ['train_station', 'subway_station', 'transit_station'];
+  const results = [];
+  for (const type of types) {
+    const data = await googleGet('/maps/api/place/nearbysearch/json', {
+      location: `${lat},${lng}`,
+      radius: String(radius),
+      type,
+      language,
+    });
+    if (data.status === 'OK' && Array.isArray(data.results)) {
+      for (const r of data.results) {
+        if (r.geometry?.location) results.push({ ...r, type_source: type });
+      }
+    }
+  }
+  return results;
+}
+
+async function timezoneInfo(lat, lng, timestampSec) {
+  const data = await googleGet('/maps/api/timezone/json', {
+    location: `${lat},${lng}`,
+    timestamp: String(timestampSec),
+  });
+  if (data.status !== 'OK') throw new Error(`Time Zone API failed: ${data.status}`);
+  return data; // { timeZoneId, rawOffset, dstOffset }
+}
+
 async function nearbySearch({ lat, lng, radius, type, keyword, language = DEFAULT_LANGUAGE, price_level = null, maxPages = 2 }) {
   const paramsBase = {
     location: `${lat},${lng}`,
@@ -867,5 +906,94 @@ function toOutput(d, openAtTime, { dow, minutesOfDay }, { includePhotoUrl = true
     image_url: imageUrl,
     image_attributions: imageAttributions,
   };
-  return { ...base };
+  const reason = buildReasonShort({ ...base, hit_count });
+  return { ...base, reason_short: reason };
+}
+
+function formatPriceBand(price_level) {
+  const band = priceLevelIndicativeYen(price_level);
+  if (!band) return null;
+  if (band.min === 0 && band.max === 1000) return '〜¥1,000';
+  if (band.max >= 999999) return '¥12,000〜';
+  return `¥${band.min.toLocaleString()}〜¥${band.max.toLocaleString()}`;
+}
+
+function buildReasonShort({ name, rating, user_ratings_total, is_open_at_scheduled_time, price_level, matched_genres = [], source_areas = [], hit_count }) {
+  const bits = [];
+  if (is_open_at_scheduled_time === true) bits.push('指定時刻に営業中');
+  if (rating != null && user_ratings_total != null) bits.push(`評価${rating.toFixed(1)}(${user_ratings_total}件)`);
+  const pb = formatPriceBand(price_level);
+  if (pb) bits.push(`価格帯${pb}`);
+  if (Array.isArray(matched_genres) && matched_genres.length) bits.push(`ジャンル: ${matched_genres.slice(0,2).join('/')}`);
+  if ((hit_count || 0) > 1) bits.push('複数エリアでヒット');
+  return bits.slice(0, 3).join('・');
+}
+
+// Favor items whose price_level implies 3000-6000 JPY, with graceful fallback
+function selectWithPriceMix(items, desired, { minYen, maxYen }) {
+  const inRange = [];
+  const nearRange = [];
+  const unknown = [];
+  for (const it of items) {
+    const pl = it.price_level;
+    if (pl == null) unknown.push(it);
+    else if (inYenRange(pl, minYen, maxYen)) inRange.push(it);
+    else nearRange.push(it);
+  }
+  const result = [];
+  const targetInRange = Math.min(inRange.length, Math.max(Math.ceil(desired * 0.6), 1));
+  result.push(...inRange.slice(0, targetInRange));
+  if (result.length < desired) result.push(...nearRange.slice(0, desired - result.length));
+  if (result.length < desired) result.push(...unknown.slice(0, desired - result.length));
+  return result.slice(0, desired);
+}
+
+// Ensure genre diversity while favoring a target price range
+function selectWithGenreAndPriceMix(items, desired, { genresPriority = [], minYen, maxYen }) {
+  const prio = genresPriority.map(String);
+  // Determine primary genre for each item
+  const groups = new Map();
+  const otherKey = '__other__';
+  for (const it of items) {
+    const mg = Array.isArray(it.matched_genres) ? it.matched_genres : [];
+    let primary = mg.find((g) => prio.includes(String(g))) || mg[0] || otherKey;
+    if (!groups.has(primary)) groups.set(primary, []);
+    groups.get(primary).push(it);
+  }
+  // Helper to pop next best from a group, preferring in-range price first
+  function popFromGroup(list) {
+    if (!list.length) return null;
+    let idx = list.findIndex((x) => inYenRange(x.price_level, minYen, maxYen));
+    if (idx === -1) idx = 0;
+    return list.splice(idx, 1)[0];
+  }
+  // Round-robin across genres priority
+  const order = prio.filter((g) => groups.has(g));
+  if (groups.has(otherKey)) order.push(otherKey);
+  const result = [];
+  while (result.length < desired && order.length) {
+    let progressed = false;
+    for (const g of order) {
+      if (result.length >= desired) break;
+      const pick = popFromGroup(groups.get(g) || []);
+      if (pick) {
+        result.push(pick);
+        progressed = true;
+      }
+    }
+    if (!progressed) break;
+  }
+  // Fill remaining from all leftovers maintaining original order
+  if (result.length < desired) {
+    const leftovers = [];
+    for (const [g, arr] of groups) {
+      leftovers.push(...arr);
+    }
+    // Prefer in-range then others
+    const inR = leftovers.filter((x) => inYenRange(x.price_level, minYen, maxYen));
+    const outR = leftovers.filter((x) => !inYenRange(x.price_level, minYen, maxYen));
+    result.push(...inR.slice(0, desired - result.length));
+    if (result.length < desired) result.push(...outR.slice(0, desired - result.length));
+  }
+  return result.slice(0, desired);
 }

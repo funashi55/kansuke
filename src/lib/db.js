@@ -74,6 +74,9 @@ export function initDB() {
     if (!cols.some((c) => c.name === 'follow_up_state')) {
       db.exec("ALTER TABLE polls ADD COLUMN follow_up_state TEXT");
     }
+    if (!cols.some((c) => c.name === 'finalized_date')) {
+      db.exec("ALTER TABLE polls ADD COLUMN finalized_date TEXT");
+    }
   } catch {}
 
   return {
@@ -82,6 +85,9 @@ export function initDB() {
       return db
         .prepare('SELECT * FROM polls WHERE group_id = ? ORDER BY created_at DESC LIMIT 1')
         .get(groupId);
+    },
+    setPollFinalizedDate(pollId, date) {
+      db.prepare('UPDATE polls SET finalized_date = ? WHERE id = ?').run(date, pollId);
     },
     setPollFollowUpState(pollId, state) {
       db.prepare('UPDATE polls SET follow_up_state = ? WHERE id = ?').run(state, pollId);
