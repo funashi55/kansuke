@@ -47,7 +47,7 @@ export function buildPollFlex({ pollId, title, options }) {
                 type: 'button',
                 style: 'primary',
                 height: 'sm',
-                color: '#1E90FF',
+                color: '#00c300',
                 action: {
                   type: 'uri',
                   label: 'フォームで回答',

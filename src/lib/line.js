@@ -1,5 +1,5 @@
 import dayjs from 'dayjs';
-import { extractCandidateDates, runWithTools, continueAfterToolResult } from './claude.js';
+import { extractCandidateDatesWithMeta, runWithTools, continueAfterToolResult } from './claude.js';
 import { buildPollFlex } from './flex.js';
 import { publish } from './sse.js';
 
@@ -74,7 +74,14 @@ async function handleTextMessage({ client, db, event, botUserId }) {
     }
     // Advanced flow: send to Claude, allow tool-calling to update candidates, then create poll
     const sessionId = db.createSession({ groupId, title: null });
-    const { text: assistantText, tool, messages } = await runWithTools({ sessionId, userText: query || text, titleHint: null });
+    const { text: assistantText, tool, messages, fallbackReason } = await runWithTools({ sessionId, userText: query || text, titleHint: null });
+
+    // If Claude is unavailable or errored, don't create a poll; inform the user instead.
+    if (fallbackReason) {
+      const errMsg = assistantText || 'エラーです。時間を空けてご利用ください。';
+      await safeSend(client, replyToken, groupId, [{ type: 'text', text: errMsg }]);
+      return;
+    }
 
     let outgoing = [];
     let pollFlex = null;
@@ -103,16 +110,25 @@ async function handleTextMessage({ client, db, event, botUserId }) {
           options: options.map((o) => ({ id: o.id, label: o.label })),
         });
 
-        // Let Claude know tool succeeded and get final short message
-        const cont = await continueAfterToolResult({ messages, toolUseId: tool.id, resultText: 'ok' });
-        const finalText = cont.text || assistantText || '候補日でアンケートを作成しました。';
-        outgoing = [{ type: 'text', text: finalText }];
+        // Let Claude know tool succeeded and get final short message (skip if fallback)
+        let finalText = assistantText || '候補日でアンケートを作成しました。';
+        if (!fallbackReason && tool.id !== 'local-fallback' && tool.id !== 'error-fallback') {
+          const cont = await continueAfterToolResult({ messages, toolUseId: tool.id, resultText: 'ok' });
+          finalText = cont.text || finalText;
+        }
+        const prefix = fallbackReason ? '※AIの解析に一時的な問題が発生したため、簡易な候補でご提案します。\n' : '';
+        outgoing = [{ type: 'text', text: prefix + finalText }];
       }
     }
 
     if (!pollFlex) {
       // Fallback to classic extraction if the tool was not used
-      const extracted = await extractCandidateDates(query || text);
+      const { candidates: extracted, source } = await extractCandidateDatesWithMeta(query || text);
+      // If extraction fell back (AI unavailable), don't create a poll.
+      if (source && source.startsWith('fallback')) {
+        await safeSend(client, replyToken, groupId, [{ type: 'text', text: 'エラーです。時間を空けてご利用ください。' }]);
+        return;
+      }
       if (extracted?.length) {
         const title = query || text || '日程候補';
         const pollId = db.createPoll({ groupId, title, options: extracted });

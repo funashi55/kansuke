@@ -2,6 +2,7 @@ import axios from 'axios';
 import dayjs from 'dayjs';
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
 function fallbackWeekendCandidates(query, limit = 6) {
   // Simple heuristic: next N Saturdays and Sundays
@@ -21,13 +22,10 @@ function fallbackWeekendCandidates(query, limit = 6) {
   return out;
 }
 
-export async function extractCandidateDates(query) {
-  // If no API key, return fallback
-  if (!ANTHROPIC_API_KEY) {
-    return fallbackWeekendCandidates(query);
-  }
-
-  const system = `You are a Japanese scheduling assistant. Given a free-form Japanese request like \"8月の土日\", output a concise JSON array of candidate dates.
+export async function extractCandidateDatesWithMeta(query) {
+  // Try Anthropic first (if available), then Gemini as fallback before giving up
+  if (ANTHROPIC_API_KEY) {
+    const system = `You are a Japanese scheduling assistant. Given a free-form Japanese request like \"8月の土日\", output a concise JSON array of candidate dates.
 Rules:
 - Timezone: Asia/Tokyo
 - Today: ${dayjs().format('YYYY-MM-DD')}
@@ -35,58 +33,74 @@ Rules:
 - Output strictly JSON with this shape: [{"date":"YYYY-MM-DD","label":"M/D(曜)"}, ...]
 - Use Japanese weekday like (月)(火)(水)(木)(金)(土)(日)
 - Limit to at most 10 items, sorted ascending by date.`;
-
-  const user = `リクエスト: ${query}\n候補日リストを出力して。`;
-
-  try {
-    const resp = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      {
-        model: 'claude-3-7-sonnet-20250219',
-        max_tokens: 400,
-        temperature: 0,
-        system,
-        messages: [{ role: 'user', content: user }],
-      },
-      {
-        headers: {
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
+    const user = `リクエスト: ${query}\n候補日リストを出力して。`;
+    try {
+      const resp = await axios.post(
+        'https://api.anthropic.com/v1/messages',
+        {
+          model: 'claude-3-7-sonnet-20250219',
+          max_tokens: 400,
+          temperature: 0,
+          system,
+          messages: [{ role: 'user', content: user }],
         },
-        timeout: 15000,
-      }
-    );
-
-    const content = (resp.data?.content?.[0]?.text || '').trim();
-    // Try to parse as JSON directly; if the model added code fencing, strip it
-    const cleaned = content
-      .replace(/^```(?:json)?/i, '')
-      .replace(/```$/i, '')
-      .trim();
-    const arr = JSON.parse(cleaned);
-    if (!Array.isArray(arr)) throw new Error('Claude did not return an array');
-    return arr
-      .filter((x) => x?.date)
-      .slice(0, 10)
-      .map((x) => ({
-        date: x.date,
-        label: x.label || dayjs(x.date).format('M/D'),
-      }));
-  } catch (e) {
-    console.warn('Claude parse failed, using fallback. Error:', e.message);
-    return fallbackWeekendCandidates(query);
+        {
+          headers: {
+            'x-api-key': ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          timeout: 15000,
+        }
+      );
+      const content = (resp.data?.content?.[0]?.text || '').trim();
+      const cleaned = content.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+      const arr = JSON.parse(cleaned);
+      if (!Array.isArray(arr)) throw new Error('Claude did not return an array');
+      const candidates = arr
+        .filter((x) => x?.date)
+        .slice(0, 10)
+        .map((x) => ({ date: x.date, label: x.label || dayjs(x.date).format('M/D') }));
+      return { candidates, source: 'anthropic' };
+    } catch (_) {
+      // fall through to Gemini
+    }
   }
+
+  // Try Gemini as secondary source
+  const gem = await geminiExtractCandidates(query);
+  if (gem && gem.length) {
+    return { candidates: gem, source: 'gemini' };
+  }
+  // Give up (let caller decide to show error rather than creating a poll)
+  return { candidates: [], source: 'fallback_error' };
+}
+
+// Backward-compatible simple version
+export async function extractCandidateDates(query) {
+  const { candidates } = await extractCandidateDatesWithMeta(query);
+  return candidates;
 }
 
 // Tool-calling helper
 // Runs a single-turn conversation with optional tool use.
 // If the assistant triggers tool_use:update_event_candidates, returns { tool: { name, input, id }, messages: [...], text }
 export async function runWithTools({ sessionId, userText, now = dayjs(), titleHint }) {
+  // Helper to build a tool response from extracted candidates
+  const makeTool = (cands) => ({
+    name: 'update_event_candidates',
+    input: { session_id: sessionId, title: titleHint || '日程候補', candidates: cands },
+    id: 'gemini-fallback',
+  });
+
   if (!ANTHROPIC_API_KEY) {
-    // Fallback: no tool calling without API key
-    const candidates = fallbackWeekendCandidates(userText);
-    return { text: '候補日をいくつか提案しました。', tool: { name: 'update_event_candidates', input: { session_id: sessionId, title: titleHint || '日程候補', candidates }, id: 'local-fallback' }, messages: [] };
+    // Try Gemini first when Anthropic is unavailable
+    const gem = await geminiExtractCandidates(userText);
+    if (gem && gem.length) {
+      return { text: '候補日をいくつか提案しました。', tool: makeTool(gem), messages: [], fallbackReason: null };
+    }
+    // No Gemini either -> error
+    return { text: 'エラーです。時間を空けてご利用ください。', tool: null, messages: [], fallbackReason: 'no_api_key' };
   }
 
   const tools = [
@@ -130,37 +144,80 @@ export async function runWithTools({ sessionId, userText, now = dayjs(), titleHi
     { role: 'user', content: userText },
   ];
 
-  const resp = await axios.post(
-    'https://api.anthropic.com/v1/messages',
-    {
-      model: 'claude-3-7-sonnet-20250219',
-      max_tokens: 600,
-      temperature: 0,
-      system,
-      tools,
-      messages,
-    },
-    {
-      headers: {
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
+  try {
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: 'claude-3-7-sonnet-20250219',
+        max_tokens: 600,
+        temperature: 0,
+        system,
+        tools,
+        messages,
       },
-      timeout: 20000,
-    }
-  );
+      {
+        headers: {
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        timeout: 20000,
+      }
+    );
 
-  const content = resp.data?.content || [];
-  const textParts = content.filter((c) => c.type === 'text').map((c) => c.text);
-  const toolUse = content.find((c) => c.type === 'tool_use' && c.name === 'update_event_candidates');
-  return {
-    messages: [
-      ...messages,
-      { role: 'assistant', content },
-    ],
-    text: textParts.join('\n').trim(),
-    tool: toolUse || null,
-  };
+    const content = resp.data?.content || [];
+    const textParts = content.filter((c) => c.type === 'text').map((c) => c.text);
+    const toolUse = content.find((c) => c.type === 'tool_use' && c.name === 'update_event_candidates');
+    return {
+      messages: [
+        ...messages,
+        { role: 'assistant', content },
+      ],
+      text: textParts.join('\n').trim(),
+      tool: toolUse || null,
+    };
+  } catch (e) {
+    console.warn('Anthropic API error; trying Gemini. Reason:', e?.response?.data || e.message);
+    const gem = await geminiExtractCandidates(userText);
+    if (gem && gem.length) {
+      return { text: '候補日をいくつか提案しました。', tool: makeTool(gem), messages, fallbackReason: null };
+    }
+    // Do not create a poll; let caller show an error message
+    return { text: 'エラーです。時間を空けてご利用ください。', tool: null, messages, fallbackReason: 'api_error' };
+  }
+}
+
+async function geminiExtractCandidates(query) {
+  try {
+    if (!GEMINI_API_KEY) return null;
+    const prompt = `あなたは日本語のスケジューリングアシスタントです。入力文から候補日を抽出し、JSON配列のみを返してください。
+ルール:
+- タイムゾーン: Asia/Tokyo
+- 今日: ${dayjs().format('YYYY-MM-DD')}
+- 未来寄りに解釈
+- 形式: [{"date":"YYYY-MM-DD","label":"M/D(曜)"}, ...]
+- 最大10件、日付昇順。出力に説明や余計なテキストは含めない。
+
+リクエスト: ${query}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const resp = await axios.post(
+      url,
+      { contents: [{ role: 'user', parts: [{ text: prompt }] }] },
+      { timeout: 15000, headers: { 'content-type': 'application/json' } }
+    );
+    const parts = resp.data?.candidates?.[0]?.content?.parts || [];
+    const text = parts.map((p) => p.text).filter(Boolean).join('\n').trim();
+    if (!text) return null;
+    const cleaned = text.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+    const arr = JSON.parse(cleaned);
+    if (!Array.isArray(arr)) return null;
+    return arr
+      .filter((x) => x?.date)
+      .slice(0, 10)
+      .map((x) => ({ date: x.date, label: x.label || dayjs(x.date).format('M/D') }));
+  } catch (_) {
+    return null;
+  }
 }
 
 export async function continueAfterToolResult({ messages, toolUseId, resultText }) {
@@ -176,25 +233,29 @@ export async function continueAfterToolResult({ messages, toolUseId, resultText 
       ],
     },
   ];
-
-  const resp = await axios.post(
-    'https://api.anthropic.com/v1/messages',
-    {
-      model: 'claude-3-7-sonnet-20250219',
-      max_tokens: 400,
-      temperature: 0,
-      messages: nextMessages,
-    },
-    {
-      headers: {
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
+  try {
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: 'claude-3-7-sonnet-20250219',
+        max_tokens: 400,
+        temperature: 0,
+        messages: nextMessages,
       },
-      timeout: 15000,
-    }
-  );
-  const content = resp.data?.content || [];
-  const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim();
-  return { text };
+      {
+        headers: {
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+    const content = resp.data?.content || [];
+    const text = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim();
+    return { text };
+  } catch (e) {
+    console.warn('Anthropic API (continue) error; using default reply. Reason:', e?.response?.data || e.message);
+    return { text: '候補日を反映しました。' };
+  }
 }
