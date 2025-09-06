@@ -73,3 +73,92 @@ export function buildPollFlex({ pollId, title, options }) {
     contents,
   };
 }
+
+export function buildShopCarousel(recommendations, { altText = 'お店の候補' } = {}) {
+  if (!recommendations || !recommendations.length) {
+    return { type: 'text', text: 'すみません、条件に合うお店が見つかりませんでした。' };
+  }
+
+  const bubbles = recommendations.slice(0, 5).map(shop => {
+    const genres = Array.isArray(shop.genres) ? shop.genres.join(' / ') : 'ジャンル情報なし';
+    const imageUrl = shop.image_url || 'https://scdn.line-apps.com/n/channel_devcenter/img/fx/01_1_cafe.png';
+
+    return {
+      type: 'bubble',
+      hero: {
+        type: 'image',
+        url: imageUrl,
+        size: 'full',
+        aspectRatio: '20:13',
+        aspectMode: 'cover',
+        action: { type: 'uri', uri: shop.google_maps_url || 'http://line.me/' },
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [
+          { type: 'text', text: shop.name, weight: 'bold', size: 'xl', wrap: true },
+          {
+            type: 'box',
+            layout: 'vertical',
+            margin: 'lg',
+            spacing: 'sm',
+            contents: [
+              { 
+                type: 'box', 
+                layout: 'baseline', 
+                spacing: 'sm', 
+                contents: [
+                  { type: 'text', text: 'エリア', color: '#aaaaaa', size: 'sm', flex: 2 },
+                  { type: 'text', text: shop.area || '-', wrap: true, color: '#666666', size: 'sm', flex: 5 }
+                ]
+              },
+              {
+                type: 'box',
+                layout: 'baseline',
+                spacing: 'sm',
+                contents: [
+                  { type: 'text', text: 'ジャンル', color: '#aaaaaa', size: 'sm', flex: 2 },
+                  { type: 'text', text: genres, wrap: true, color: '#666666', size: 'sm', flex: 5 }
+                ]
+              },
+              {
+                type: 'box',
+                layout: 'vertical',
+                spacing: 'sm',
+                margin: 'md',
+                contents: [
+                  { type: 'text', text: 'おすすめ理由', size: 'sm', color: '#aaaaaa' },
+                  { type: 'text', text: shop.reason || '-', wrap: true, size: 'sm', color: '#666666' }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: [
+          {
+            type: 'button',
+            style: 'link',
+            height: 'sm',
+            action: { type: 'uri', label: 'Googleマップで見る', uri: shop.google_maps_url || 'http://line.me/' }
+          }
+        ],
+        flex: 0
+      }
+    };
+  });
+
+  return {
+    type: 'flex',
+    altText,
+    contents: {
+      type: 'carousel',
+      contents: bubbles,
+    },
+  };
+}

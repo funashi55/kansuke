@@ -1,7 +1,8 @@
 import dayjs from 'dayjs';
 import { runWithTools, continueAfterToolResult } from './claude.js';
-import { buildPollFlex } from './flex.js';
+import { buildPollFlex, buildShopCarousel } from './flex.js';
 import { publish } from './sse.js';
+import { suggestPlacesFromNL } from './shop_suggester.js';
 
 function extractQueryFromText(message) {
   const text = message.text || '';
@@ -61,7 +62,31 @@ async function handleTextMessage({ client, db, event, botUserId }) {
   }
   const replyToken = event.replyToken;
 
+  // Restaurant search flow
+  const latestPoll = db.getLatestPollForGroup(groupId);
+  if (latestPoll && latestPoll.follow_up_state === 'question_sent' && !looksLikeScheduleRequest(query)) {
+    try {
+      await safeReply(client, replyToken, [{ type: 'text', text: 'お店を検索中です...少々お待ちください。' }]);
+      const results = await suggestPlacesFromNL(query, { date: latestPoll.date });
+      const recommendations = results?.top5_structured?.recommendations;
+      if (recommendations && recommendations.length > 0) {
+        const flexMessage = buildShopCarousel(recommendations, { altText: `「${query}」のおすすめのお店` });
+        await safePush(client, groupId, [flexMessage]);
+      } else {
+        await safePush(client, groupId, [{ type: 'text', text: 'すみません、ご希望に合うお店が見つかりませんでした。' }]);
+      }
+      db.setPollFollowUpState(latestPoll.id, 'completed');
+    } catch (e) {
+      console.error('[ShopSearch] Error:', e);
+      await safePush(client, groupId, [{ type: 'text', text: `お店の検索中にエラーが発生しました。
+${e.message}` }]);
+    }
+    return;
+  }
+
+  // Scheduling flow
   if (mentioned) {
+
     // Log mention event details
     const senderName = await getDisplayNameSafe(client, event.source);
     try {
@@ -251,6 +276,9 @@ async function handlePostback({ client, db, event }) {
       // Notify group
       if (poll.group_id) {
         await safePush(client, poll.group_id, [{ type: 'text', text }]);
+        // Follow-up question for restaurants
+        await safePush(client, poll.group_id, [{ type: 'text', text: '次に、お店の希望（エリアや料理ジャンルなど）を教えてください！'}]);
+        db.setPollFollowUpState(pollId, 'question_sent');
       }
       // Ack to the user
       await safeReply(client, replyToken, [{ type: 'text', text: '確定しました。グループに通知しました。' }]);

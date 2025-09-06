@@ -68,14 +68,24 @@ export function initDB() {
   // Add deadline column to polls if missing
   try {
     const cols = db.prepare("PRAGMA table_info('polls')").all();
-    const hasDeadline = cols.some((c) => c.name === 'deadline');
-    if (!hasDeadline) {
+    if (!cols.some((c) => c.name === 'deadline')) {
       db.exec("ALTER TABLE polls ADD COLUMN deadline INTEGER");
+    }
+    if (!cols.some((c) => c.name === 'follow_up_state')) {
+      db.exec("ALTER TABLE polls ADD COLUMN follow_up_state TEXT");
     }
   } catch {}
 
   return {
     db,
+    getLatestPollForGroup(groupId) {
+      return db
+        .prepare('SELECT * FROM polls WHERE group_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get(groupId);
+    },
+    setPollFollowUpState(pollId, state) {
+      db.prepare('UPDATE polls SET follow_up_state = ? WHERE id = ?').run(state, pollId);
+    },
     // Event/session state
     createSession({ groupId, title }) {
       const id = crypto.randomUUID();
