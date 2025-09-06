@@ -94,8 +94,6 @@ app.get(/^\/liff\/.+\.html$/, (req, res, next) => {
 
 // Static files (LIFF assets and others)
 app.use('/liff', express.static('public/liff'));
-// Public media for generated images
-app.use('/media', express.static('public/media'));
 
 // Public config for frontend (non-sensitive)
 app.get('/api/public-config', (_req, res) => {
