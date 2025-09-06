@@ -31,6 +31,7 @@ const db = initDB();
 // LINE client and webhook
 const client = new line.Client({ channelAccessToken: config.channelAccessToken });
 const runtime = { botUserId: process.env.BOT_USER_ID || '' };
+const promptedClosePolls = new Set();
 // Try to fetch bot's userId automatically (so BOT_USER_ID env is optional)
 (async () => {
   try {
@@ -143,6 +144,8 @@ app.post('/api/polls/:pollId/votes3', async (req, res) => {
     db.upsertVotes3({ pollId, userId: uid, userName: name, choices });
     const tally3 = db.getPollTally3(pollId);
     publish(pollId, { type: 'tally', tally: tally3 });
+    // Check completion and possibly prompt to close
+    checkAndPromptClose({ pollId }).catch((e) => console.warn('checkAndPromptClose error', e.message));
     res.json({ ok: true, tally: tally3 });
   } catch (e) {
     console.error('POST /api/polls votes3 error', e);
@@ -188,3 +191,71 @@ app.post('/api/polls/:pollId/deadline', express.json(), (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
 });
+
+// Helpers
+async function getAllMemberIds(groupOrRoomId) {
+  // Try group first, then room
+  const out = [];
+  try {
+    let start = undefined;
+    do {
+      const res = await client.getGroupMemberIds(groupOrRoomId, start);
+      if (!res) break;
+      out.push(...(res.memberIds || []));
+      start = res.next;
+    } while (start);
+    if (out.length) return out;
+  } catch (_) {}
+  try {
+    let start = undefined;
+    do {
+      const res = await client.getRoomMemberIds(groupOrRoomId, start);
+      if (!res) break;
+      out.push(...(res.memberIds || []));
+      start = res.next;
+    } while (start);
+  } catch (_) {}
+  return out;
+}
+
+async function checkAndPromptClose({ pollId }) {
+  const data = db.getPoll(pollId);
+  if (!data) return;
+  const { poll, options } = data;
+  if (!poll || poll.status !== 'open') return;
+  if (promptedClosePolls.has(pollId)) return; // avoid spamming
+  if (!poll.group_id) return;
+
+  const memberIds = await getAllMemberIds(poll.group_id);
+  if (!memberIds || memberIds.length === 0) return;
+  const humanIds = memberIds.filter((id) => id && id !== runtime.botUserId);
+  const nOpts = options.length;
+  if (nOpts === 0) return;
+
+  const counts = db.getAnswerCountsByUser(pollId); // [{ user_id, cnt }]
+  const byUser = new Map(counts.map((r) => [r.user_id, Number(r.cnt) || 0]));
+  const allAnswered = humanIds.length > 0 && humanIds.every((uid) => (byUser.get(uid) || 0) >= nOpts);
+  if (!allAnswered) return;
+
+  // Build confirm template
+  const messages = [
+    {
+      type: 'template',
+      altText: '全員の回答が揃いました。締め切りますか？',
+      template: {
+        type: 'confirm',
+        text: '全員の回答が揃いました。締め切りますか？',
+        actions: [
+          { type: 'postback', label: 'はい', data: `close:${pollId}:yes` },
+          { type: 'postback', label: 'いいえ', data: `close:${pollId}:no` },
+        ],
+      },
+    },
+  ];
+  try {
+    await client.pushMessage(poll.group_id, messages);
+    promptedClosePolls.add(pollId);
+  } catch (e) {
+    console.warn('push confirm failed', e?.response?.data || e.message);
+  }
+}

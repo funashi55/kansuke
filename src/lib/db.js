@@ -135,6 +135,9 @@ export function initDB() {
         .all(pollId);
       return { poll, options };
     },
+    setPollStatus(pollId, status) {
+      db.prepare('UPDATE polls SET status = ? WHERE id = ?').run(status, pollId);
+    },
     setPollDeadline(pollId, deadlineTs) {
       db.prepare('UPDATE polls SET deadline = ? WHERE id = ?').run(deadlineTs || null, pollId);
     },
@@ -171,6 +174,11 @@ export function initDB() {
       return db
         .prepare('SELECT option_id, choice FROM votes3 WHERE poll_id = ? AND user_id = ?')
         .all(pollId, userId);
+    },
+    getAnswerCountsByUser(pollId) {
+      return db
+        .prepare('SELECT user_id, COUNT(*) as cnt FROM votes3 WHERE poll_id = ? GROUP BY user_id')
+        .all(pollId);
     },
     upsertVotes3({ pollId, userId, userName, choices }) {
       const now = Date.now();

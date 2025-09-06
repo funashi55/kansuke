@@ -165,6 +165,80 @@ async function handlePostback({ client, db, event }) {
     await safeReply(client, replyToken, [{ type: 'text', text: `現在の集計\n${summary}` }]);
     return;
   }
+
+  if (data.startsWith('close:')) {
+    const [, pollId, yn] = data.split(':');
+    if (yn === 'yes') {
+      // Present candidate options as a Flex with buttons to finalize
+      const d = db.getPoll(pollId);
+      if (!d) {
+        await safeReply(client, replyToken, [{ type: 'text', text: '対象の投票が見つかりませんでした。' }]);
+        return;
+      }
+      const { poll, options } = d;
+      const tally = db.getPollTally3(pollId);
+      // Sort by yes desc, maybe desc, no asc
+      const byId = new Map(tally.map((t) => [t.option_id, t]));
+      const sorted = [...options].sort((a, b) => {
+        const ta = byId.get(a.id) || { yes_count: 0, maybe_count: 0, no_count: 0 };
+        const tb = byId.get(b.id) || { yes_count: 0, maybe_count: 0, no_count: 0 };
+        if (tb.yes_count !== ta.yes_count) return tb.yes_count - ta.yes_count;
+        if (tb.maybe_count !== ta.maybe_count) return tb.maybe_count - ta.maybe_count;
+        return ta.no_count - tb.no_count;
+      });
+      const bubbles = sorted.slice(0, 10).map((opt) => {
+        const t = byId.get(opt.id) || { yes_count: 0, maybe_count: 0, no_count: 0 };
+        return {
+          type: 'bubble',
+          body: {
+            type: 'box',
+            layout: 'vertical',
+            spacing: 'sm',
+            contents: [
+              { type: 'text', text: poll.title || '候補日', weight: 'bold', size: 'sm', color: '#888888' },
+              { type: 'text', text: opt.label, weight: 'bold', size: 'md', wrap: true },
+              { type: 'text', text: `○${t.yes_count} / △${t.maybe_count} / ×${t.no_count}`, size: 'sm', color: '#666666' },
+            ],
+          },
+          footer: {
+            type: 'box', layout: 'vertical', contents: [
+              { type: 'button', style: 'primary', height: 'sm', color: '#00c300', action: { type: 'postback', label: 'この日にする', data: `finalize:${pollId}:${opt.id}` } }
+            ]
+          }
+        };
+      });
+      const flex = { type: 'flex', altText: '候補日の選択', contents: { type: 'carousel', contents: bubbles.length ? bubbles : [{ type: 'bubble', body: { type: 'box', layout:'vertical', contents: [{ type: 'text', text: '候補がありません' }] } }] } };
+      await safeReply(client, replyToken, [
+        { type: 'text', text: '締め切りの承認ありがとうございます。最終候補を選んでください。' },
+        flex,
+      ]);
+    } else {
+      await safeReply(client, replyToken, [{ type: 'text', text: '了解しました。引き続き投票を受け付けます。' }]);
+    }
+    return;
+  }
+
+  if (data.startsWith('finalize:')) {
+    const [, pollId, optionId] = data.split(':');
+    try {
+      const d = db.getPoll(pollId);
+      if (!d) throw new Error('poll_not_found');
+      const { poll, options } = d;
+      const opt = options.find((o) => o.id === optionId);
+      if (!opt) throw new Error('option_not_found');
+      db.setPollStatus(pollId, 'closed');
+      const text = `「${poll.title}」は ${opt.label} に確定しました。`; 
+      // Notify group
+      if (poll.group_id) {
+        await safePush(client, poll.group_id, [{ type: 'text', text }]);
+      }
+      // Ack to the user
+      await safeReply(client, replyToken, [{ type: 'text', text: '確定しました。グループに通知しました。' }]);
+    } catch (e) {
+      await safeReply(client, replyToken, [{ type: 'text', text: `確定に失敗: ${e.message}` }]);
+    }
+    return;
+  }
 }
 
 async function safeReply(client, replyToken, messages) {
