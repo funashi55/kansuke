@@ -109,6 +109,8 @@
 
       let idToken = null;
       let state = { options: [], tally: [], userChoices: [] };
+      // Preserve in-progress selections locally to avoid flicker on re-render (e.g., due to SSE updates)
+      const localChoices = new Map(); // optionId -> choice (0/1/2)
       let pollClosed = false;
 
       function choiceName(n){ return n===2?'○':n===1?'△':'×'; }
@@ -131,8 +133,15 @@
             r.value = String(val);
             r.id = id;
             if (pollClosed) r.disabled = true;
+            // Prefer local (unsaved) selection to avoid flicker, fallback to server state
+            const local = localChoices.has(opt.id) ? localChoices.get(opt.id) : null;
             const mine = state.userChoices.find(c => c.option_id === opt.id);
-            if (mine && String(mine.choice) === String(val)) r.checked = true;
+            const chosen = (local != null ? local : (mine ? mine.choice : null));
+            if (chosen != null && String(chosen) === String(val)) r.checked = true;
+            // Track local changes
+            r.addEventListener('change', () => {
+              localChoices.set(opt.id, Number(r.value));
+            });
             const l = document.createElement('label');
             l.htmlFor = id;
             l.textContent = choiceName(val);
@@ -266,6 +275,8 @@
         const data = await res.json();
         pollClosed = data?.poll?.status && data.poll.status !== 'open';
         state = { options: data.options, tally: data.tally, userChoices: data.userChoices };
+        // Once we fetched fresh server state, clear local in-progress choices
+        localChoices.clear();
         document.getElementById('title').textContent = data.poll.title;
         const dl = document.getElementById('deadline');
         if (data.poll.deadline){
