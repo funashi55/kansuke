@@ -247,6 +247,7 @@ async function checkAndPromptClose({ pollId }) {
   const byUser = new Map(counts.map((r) => [r.user_id, Number(r.cnt) || 0]));
   const completedUsers = counts.filter((r) => Number(r.cnt) >= nOpts).map((r) => r.user_id);
   let allAnswered = false;
+  let humanIds = null;
   if (typeof memberCount === 'number' && memberCount > 0) {
     // 公式の人数と「全候補を埋めたユーザー数」を比較
     allAnswered = completedUsers.length >= memberCount;
@@ -257,7 +258,7 @@ async function checkAndPromptClose({ pollId }) {
     if (!memberIds || memberIds.length === 0) {
       dlog('no-member-ids', { group_id: poll.group_id });
     }
-    const humanIds = memberIds.filter((id) => id && id !== runtime.botUserId);
+    humanIds = memberIds.filter((id) => id && id !== runtime.botUserId);
     if (memberIds.length) dlog('members', { total: memberIds.length, humans: humanIds.length, botUserId: runtime.botUserId });
     allAnswered = humanIds.length > 0 && humanIds.every((uid) => (byUser.get(uid) || 0) >= nOpts);
     // さらにダメなら最終フォールバック（投票に参加した人全員が完了 && 2人以上）
@@ -272,15 +273,19 @@ async function checkAndPromptClose({ pollId }) {
     }
   }
   if (!allAnswered) {
-    const missing = humanIds.filter((uid) => (byUser.get(uid) || 0) < nOpts);
-    dlog('not-all-answered', {
-      nOpts,
-      counts,
-      missingCount: missing.length,
-      missingSample: missing.slice(0, 5),
-    });
+    if (humanIds) {
+      const missing = humanIds.filter((uid) => (byUser.get(uid) || 0) < nOpts);
+      dlog('not-all-answered', {
+        nOpts,
+        counts,
+        missingCount: missing.length,
+        missingSample: missing.slice(0, 5),
+      });
+    } else {
+      dlog('not-all-answered', { nOpts, completedUsers: completedUsers.length, memberCount });
+    }
   } else {
-    dlog('all-answered', { nHumans: humanIds.length, nOpts });
+    dlog('all-answered', { nHumans: humanIds ? humanIds.length : memberCount, nOpts });
   }
   if (!allAnswered) return;
 
