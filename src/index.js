@@ -212,6 +212,25 @@ async function getAllMemberIds(groupOrRoomId) {
   return [];
 }
 
+async function getHumanMemberCount(groupOrRoomId) {
+  // Prefer official count API which includes users who haven't friended the bot and excludes the bot automatically.
+  try {
+    const res = await client.getGroupMembersCount(groupOrRoomId);
+    if (res && typeof res.count === 'number') {
+      dlog('getGroupMembersCount', { groupOrRoomId, count: res.count });
+      return res.count;
+    }
+  } catch (_) {}
+  try {
+    const res = await client.getRoomMembersCount(groupOrRoomId);
+    if (res && typeof res.count === 'number') {
+      dlog('getRoomMembersCount', { groupOrRoomId, count: res.count });
+      return res.count;
+    }
+  } catch (_) {}
+  return null;
+}
+
 async function checkAndPromptClose({ pollId }) {
   const data = db.getPoll(pollId);
   if (!data) return;
@@ -220,15 +239,38 @@ async function checkAndPromptClose({ pollId }) {
   if (promptedClosePolls.has(pollId)) return; // avoid spamming
   if (!poll.group_id) return;
   dlog('checkAndPromptClose:start', { pollId, group_id: poll.group_id, options: options.length });
-  const memberIds = await getAllMemberIds(poll.group_id);
-  if (!memberIds || memberIds.length === 0) return;
-  const humanIds = memberIds.filter((id) => id && id !== runtime.botUserId);
   const nOpts = options.length;
   if (nOpts === 0) return;
-  dlog('members', { total: memberIds.length, humans: humanIds.length, botUserId: runtime.botUserId });
+  // まずはメンバーの総数（Bot除外済みの人数）が取得できるか試す
+  const memberCount = await getHumanMemberCount(poll.group_id);
   const counts = db.getAnswerCountsByUser(pollId); // [{ user_id, cnt }]
   const byUser = new Map(counts.map((r) => [r.user_id, Number(r.cnt) || 0]));
-  const allAnswered = humanIds.length > 0 && humanIds.every((uid) => (byUser.get(uid) || 0) >= nOpts);
+  const completedUsers = counts.filter((r) => Number(r.cnt) >= nOpts).map((r) => r.user_id);
+  let allAnswered = false;
+  if (typeof memberCount === 'number' && memberCount > 0) {
+    // 公式の人数と「全候補を埋めたユーザー数」を比較
+    allAnswered = completedUsers.length >= memberCount;
+    dlog('count-check', { memberCount, completedUsers: completedUsers.length, nOpts });
+  } else {
+    // 旧来のIDベース（取得できる場合）
+    const memberIds = await getAllMemberIds(poll.group_id);
+    if (!memberIds || memberIds.length === 0) {
+      dlog('no-member-ids', { group_id: poll.group_id });
+    }
+    const humanIds = memberIds.filter((id) => id && id !== runtime.botUserId);
+    if (memberIds.length) dlog('members', { total: memberIds.length, humans: humanIds.length, botUserId: runtime.botUserId });
+    allAnswered = humanIds.length > 0 && humanIds.every((uid) => (byUser.get(uid) || 0) >= nOpts);
+    // さらにダメなら最終フォールバック（投票に参加した人全員が完了 && 2人以上）
+    if (!allAnswered) {
+      const voters = counts.map((r) => r.user_id).filter(Boolean);
+      const uniqueVoters = Array.from(new Set(voters));
+      const votersAllDone = uniqueVoters.length > 0 && uniqueVoters.every((uid) => (byUser.get(uid) || 0) >= nOpts);
+      dlog('fallback-voters', { uniqueVoters: uniqueVoters.length, votersAllDone, nOpts });
+      if (votersAllDone && uniqueVoters.length >= 2) {
+        allAnswered = true;
+      }
+    }
+  }
   if (!allAnswered) {
     const missing = humanIds.filter((uid) => (byUser.get(uid) || 0) < nOpts);
     dlog('not-all-answered', {
