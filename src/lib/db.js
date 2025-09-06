@@ -175,6 +175,11 @@ export function initDB() {
         .prepare('SELECT option_id, choice FROM votes3 WHERE poll_id = ? AND user_id = ?')
         .all(pollId, userId);
     },
+    getUserChoice3({ pollId, userId, optionId }) {
+      return db
+        .prepare('SELECT option_id, choice FROM votes3 WHERE poll_id = ? AND user_id = ? AND option_id = ?')
+        .get(pollId, userId, optionId) || null;
+    },
     getAnswerCountsByUser(pollId) {
       return db
         .prepare('SELECT user_id, COUNT(*) as cnt FROM votes3 WHERE poll_id = ? GROUP BY user_id')
@@ -188,10 +193,13 @@ export function initDB() {
          ON CONFLICT(poll_id, option_id, user_id) DO UPDATE SET choice = excluded.choice, user_name = excluded.user_name, updated_at = excluded.updated_at`
       );
       const tx = db.transaction(() => {
+        const seen = new Set();
         for (const ch of choices) {
           if (!('optionId' in ch) || typeof ch.optionId !== 'string') continue;
           const choice = Number(ch.choice);
           if (![0, 1, 2].includes(choice)) continue;
+          if (seen.has(ch.optionId)) continue;
+          seen.add(ch.optionId);
           stmt.run(pollId, ch.optionId, userId, userName || null, choice, now);
         }
       });

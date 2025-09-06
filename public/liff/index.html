@@ -33,8 +33,7 @@
       #title{ margin:0; font-size:20px; line-height:1.3; }
       .badge{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:rgba(255,255,255,.06); color:var(--muted); font-size:12px; border:1px solid var(--line); }
       #user{ color:var(--muted); font-size:12px; }
-      .notice{ margin:0 0 12px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background: rgba(255,193,7,.12); color: var(--text); font-size:13px; }
-      .notice .btn{ display:inline-block; margin-top:8px; padding:8px 12px; border-radius:8px; background:#00c300; color:#fff; font-weight:800; text-decoration:none; }
+      .notice{ margin:0 0 12px; padding:14px 16px; border:1px solid var(--line); border-radius:10px; background: rgba(255,193,7,.12); color: var(--text); font-size:14px; }
       .hidden{ display:none; }
       .legend{ display:flex; gap:8px; align-items:center; color:var(--muted); font-size:12px; margin:6px 0 2px; }
       .pill{ display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; border:1px solid var(--line); background:rgba(255,255,255,.04); font-size:12px; color:var(--muted); }
@@ -65,10 +64,7 @@
   <body>
     <div class="container">
       <div class="card">
-        <div id="extNotice" class="notice hidden">
-          外部ブラウザでは正常に動作しない場合があります。LINEアプリ内で開くことを推奨します。
-          <div><a id="openInLine" class="btn" href="#">LINEアプリで開く</a></div>
-        </div>
+        <div id="extNotice" class="notice hidden"></div>
         <div class="header">
           <h3 id="title">日程投票</h3>
           <span id="deadline" class="badge">締切: -</span>
@@ -179,13 +175,15 @@
           document.getElementById('msg').textContent = 'LIFF 初期化に失敗: ' + (e?.message || e);
           return;
         }
-        // Recommend opening in LINE app when in external browser
+        // If in external browser, do not render the form at all
         if (!liff.isInClient()){
-          const $n = document.getElementById('extNotice');
-          const $a = document.getElementById('openInLine');
-          const state = location.pathname + location.search;
-          $a.href = `line://app/${encodeURIComponent(LIFF_ID)}?liff.state=${encodeURIComponent(state)}`;
-          $n.classList.remove('hidden');
+          const $card = document.querySelector('.card');
+          if ($card){
+            $card.innerHTML = '<div class="notice">スマートフォンのLINEアプリじゃないと利用できません。</div>';
+          } else {
+            document.body.innerHTML = '<div class="notice">スマートフォンのLINEアプリじゃないと利用できません。</div>';
+          }
+          return;
         }
         // Ensure login with openid scope when outside client
         const u = new URL(location.href);
@@ -297,6 +295,7 @@
         // any not selected? treat as no change (do not send)
         const choices = Array.from(byOption.entries()).map(([optionId, choice]) => ({ optionId, choice }));
         $save.classList.add('disabled');
+        $save.disabled = true;
         try{
           const res = await fetch(`/api/polls/${encodeURIComponent(pollId)}/votes3`, {
             method: 'POST',
@@ -319,6 +318,7 @@
           $msg.innerHTML = `<span class="error">${e.message}</span>`;
         }finally{
           $save.classList.remove('disabled');
+          $save.disabled = false;
         }
       });
 

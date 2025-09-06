@@ -141,7 +141,13 @@ async function handlePostback({ client, db, event }) {
   if (data.startsWith('vote:')) {
     const [, pollId, optionId] = data.split(':');
     try {
-      // Record as ○ in ternary votes, and keep legacy single-vote for compatibility
+      // If already marked as ○ for this option, don't upsert again
+      const current = db.getUserChoice3({ pollId, userId, optionId });
+      if (current && Number(current.choice) === 2) {
+        await safeReply(client, replyToken, [{ type: 'text', text: 'この候補への○は既に記録されています。' }]);
+        return;
+      }
+      // Record as ○ in ternary votes
       db.upsertVotes3({ pollId, userId, userName, choices: [{ optionId, choice: 2 }] });
       const tally = db.getPollTally3(pollId);
       const summary = formatTally3(tally);
