@@ -1,5 +1,5 @@
 import dayjs from 'dayjs';
-import { extractCandidateDatesWithMeta, runWithTools, continueAfterToolResult } from './claude.js';
+import { runWithTools, continueAfterToolResult } from './claude.js';
 import { buildPollFlex } from './flex.js';
 import { publish } from './sse.js';
 
@@ -76,9 +76,9 @@ async function handleTextMessage({ client, db, event, botUserId }) {
     const sessionId = db.createSession({ groupId, title: null });
     const { text: assistantText, tool, messages, fallbackReason } = await runWithTools({ sessionId, userText: query || text, titleHint: null });
 
-    // If Claude is unavailable or errored, don't create a poll; inform the user instead.
+    // If LLMs are unavailable/errored, always return error (no poll)
     if (fallbackReason) {
-      const errMsg = assistantText || 'エラーです。時間を空けてご利用ください。';
+      const errMsg = 'エラーです。時間を空けてご利用ください。';
       await safeSend(client, replyToken, groupId, [{ type: 'text', text: errMsg }]);
       return;
     }
@@ -116,31 +116,13 @@ async function handleTextMessage({ client, db, event, botUserId }) {
           const cont = await continueAfterToolResult({ messages, toolUseId: tool.id, resultText: 'ok' });
           finalText = cont.text || finalText;
         }
-        const prefix = fallbackReason ? '※AIの解析に一時的な問題が発生したため、簡易な候補でご提案します。\n' : '';
-        outgoing = [{ type: 'text', text: prefix + finalText }];
+        outgoing = [{ type: 'text', text: finalText }];
       }
     }
 
     if (!pollFlex) {
-      // Fallback to classic extraction if the tool was not used
-      const { candidates: extracted, source } = await extractCandidateDatesWithMeta(query || text);
-      // If extraction fell back (AI unavailable), don't create a poll.
-      if (source && source.startsWith('fallback')) {
-        await safeSend(client, replyToken, groupId, [{ type: 'text', text: 'エラーです。時間を空けてご利用ください。' }]);
-        return;
-      }
-      if (extracted?.length) {
-        const title = query || text || '日程候補';
-        const pollId = db.createPoll({ groupId, title, options: extracted });
-        console.log(`[MENTION] fallback extractor -> created poll ${pollId} with ${extracted.length} candidates`);
-        const { options } = db.getPoll(pollId);
-        pollFlex = buildPollFlex({
-          pollId,
-          title: shorten(title, 60),
-          options: options.map((o) => ({ id: o.id, label: o.label })),
-        });
-      }
-      const msg = assistantText || '候補日を提案しました。ご確認ください。';
+      // No tool use -> return the LLM-crafted guidance; do not create poll
+      const msg = assistantText && assistantText.trim() ? assistantText : '候補の日付が分かるように、具体的な日付または期間を教えてください。';
       outgoing = [{ type: 'text', text: msg }];
     }
 

@@ -99,6 +99,11 @@ export async function runWithTools({ sessionId, userText, now = dayjs(), titleHi
     if (gem && gem.length) {
       return { text: '候補日をいくつか提案しました。', tool: makeTool(gem), messages: [], fallbackReason: null };
     }
+    // If Gemini couldn't extract dates, still try to produce a clarifying reply via Gemini
+    const gemMsg = await geminiAskPrompt(userText);
+    if (gemMsg) {
+      return { text: gemMsg, tool: null, messages: [], fallbackReason: null };
+    }
     // No Gemini either -> error
     return { text: 'エラーです。時間を空けてご利用ください。', tool: null, messages: [], fallbackReason: 'no_api_key' };
   }
@@ -182,6 +187,11 @@ export async function runWithTools({ sessionId, userText, now = dayjs(), titleHi
     if (gem && gem.length) {
       return { text: '候補日をいくつか提案しました。', tool: makeTool(gem), messages, fallbackReason: null };
     }
+    // Try to produce a clarifying message via Gemini
+    const gemMsg = await geminiAskPrompt(userText);
+    if (gemMsg) {
+      return { text: gemMsg, tool: null, messages, fallbackReason: null };
+    }
     // Do not create a poll; let caller show an error message
     return { text: 'エラーです。時間を空けてご利用ください。', tool: null, messages, fallbackReason: 'api_error' };
   }
@@ -189,7 +199,10 @@ export async function runWithTools({ sessionId, userText, now = dayjs(), titleHi
 
 async function geminiExtractCandidates(query) {
   try {
-    if (!GEMINI_API_KEY) return null;
+    if (!GEMINI_API_KEY) {
+      console.warn('Gemini fallback not configured (GEMINI_API_KEY missing)');
+      return null;
+    }
     const prompt = `あなたは日本語のスケジューリングアシスタントです。入力文から候補日を抽出し、JSON配列のみを返してください。
 ルール:
 - タイムゾーン: Asia/Tokyo
@@ -211,10 +224,35 @@ async function geminiExtractCandidates(query) {
     const cleaned = text.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
     const arr = JSON.parse(cleaned);
     if (!Array.isArray(arr)) return null;
-    return arr
+    const mapped = arr
       .filter((x) => x?.date)
       .slice(0, 10)
       .map((x) => ({ date: x.date, label: x.label || dayjs(x.date).format('M/D') }));
+    console.log('[GEMINI] extracted candidates:', mapped.length);
+    return mapped;
+  } catch (_) {
+    console.warn('Gemini fallback error; no candidates');
+    return null;
+  }
+}
+
+async function geminiAskPrompt(userText) {
+  try {
+    if (!GEMINI_API_KEY) return null;
+    const sys = `あなたは日本語のスケジューリングアシスタントです。`;
+    const instr = `以下の発話に対して、必要な日付情報を丁寧かつ簡潔に確認してください。\n` +
+      `- 1〜2文程度で、具体的な入力例（10/5, 10/12 や 10/1-10/11 の土日 など）を含める\n` +
+      `- 余計な装飾やコードブロックは不要\n`;
+    const prompt = `${sys}\n${instr}\n発話: ${userText}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const resp = await axios.post(
+      url,
+      { contents: [{ role: 'user', parts: [{ text: prompt }] }] },
+      { timeout: 12000, headers: { 'content-type': 'application/json' } }
+    );
+    const parts = resp.data?.candidates?.[0]?.content?.parts || [];
+    const text = parts.map((p) => p.text).filter(Boolean).join('\n').trim();
+    return text || null;
   } catch (_) {
     return null;
   }
