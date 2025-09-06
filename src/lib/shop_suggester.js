@@ -1,17 +1,6 @@
-/**
- * Suggest restaurants/izakaya candidates (5-6) using Google Places API.
- * Input: JSON with date/time, area, genre (and optional options).
- * Output: JSON list of suggested places with details and open-at-time flag.
- *
- * Requirements:
- * - Node.js 18+ (global fetch available)
- * - Env: GOOGLE_MAPS_API_KEY
- * - Enable APIs: Places API, Geocoding API, Time Zone API
- *
- * Usage examples:
- *   node scripts/suggest_places.js --input input.json
- *   echo '{"dateTime":"2025-09-06 19:00","area":"渋谷駅","genre":"居酒屋"}' | node scripts/suggest_places.js
- */
+import path from 'node:path';
+import axios from 'axios';
+import dayjs from 'dayjs';
 
 // ------------------------- Config -------------------------
 const DEFAULT_LANGUAGE = 'ja';
@@ -24,10 +13,6 @@ const DEFAULT_STATION_SEARCH_RADIUS_M = 2000; // station lookup radius
 const DEFAULT_GEMINI_MODEL = 'gemini-1.5-flash';
 
 // ------------------------- Utils --------------------------
-import path from 'node:path';
-import axios from 'axios';
-import dayjs from 'dayjs';
-
 function assertEnv() {
   const key = process.env.GOOGLE_MAPS_API_KEY;
   if (!key) {
@@ -53,129 +38,6 @@ function getGeminiKey() {
 
 function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
-}
-
-function parseCLIArgs() {
-  const args = process.argv.slice(2);
-  const out = { inputPath: null, nlText: null, logFile: null, logLevel: null, logStderr: null };
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if ((a === '--input' || a === '-i') && i + 1 < args.length) {
-      out.inputPath = args[++i];
-    } else if ((a === '--nl' || a === '--text') && i + 1 < args.length) {
-      out.nlText = args[++i];
-    } else if (a === '--log-file' && i + 1 < args.length) {
-      out.logFile = args[++i];
-    } else if (a === '--log-level' && i + 1 < args.length) {
-      out.logLevel = args[++i];
-    } else if (a === '--log-stderr') {
-      out.logStderr = '1';
-    }
-  }
-  return out;
-}
-
-function readStdin() {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => (data += chunk));
-    process.stdin.on('end', () => resolve(data));
-    process.stdin.on('error', reject);
-  });
-}
-
-// Lightweight .env loader (no external dependency)
-async function loadDotEnv(path = '.env') {
-  try {
-    const fs = await import('node:fs/promises');
-    const raw = await fs.readFile(path, 'utf8');
-    const lines = raw.split(/\r?\n/);
-    for (let line of lines) {
-      if (!line) continue;
-      // Trim and drop comments/blank
-      line = line.trim();
-      if (!line || line.startsWith('#')) continue;
-      if (line.startsWith('export ')) line = line.slice(7).trim();
-
-      const eq = line.indexOf('=');
-      if (eq === -1) continue;
-      const key = line.slice(0, eq).trim();
-      let value = line.slice(eq + 1).trim();
-
-      const isQuoted = (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"));
-      if (isQuoted) {
-        value = value.slice(1, -1);
-      } else {
-        // Remove inline comments starting with # if not quoted
-        const hashIdx = (() => {
-          for (let i = 0; i < value.length; i++) {
-            if (value[i] === '#') {
-              // Treat as comment if beginning or preceded by whitespace
-              if (i === 0 || /\s/.test(value[i - 1])) return i;
-            }
-          }
-          return -1;
-        })();
-        if (hashIdx >= 0) value = value.slice(0, hashIdx).trim();
-      }
-      // Unescape common sequences
-      value = value.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
-
-      if (key && !(key in process.env)) {
-        process.env[key] = value;
-      }
-    }
-  } catch (e) {
-    // .env not found or unreadable: ignore silently
-  }
-}
-
-// ------------------------- Logging ------------------------
-const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
-let LOG_CFG = { filePath: null, toStderr: false, levelNum: LOG_LEVELS.info };
-let _fs_promises = null;
-async function _fs() {
-  if (_fs_promises) return _fs_promises;
-  _fs_promises = await import('node:fs/promises');
-  return _fs_promises;
-}
-function _levelNum(lvl) {
-  return LOG_LEVELS[(lvl || 'info').toLowerCase()] ?? LOG_LEVELS.info;
-}
-async function configureLogging({ filePath, level = 'info', toStderr = false } = {}) {
-  LOG_CFG.filePath = filePath || null;
-  LOG_CFG.toStderr = !!toStderr;
-  LOG_CFG.levelNum = _levelNum(level);
-  if (LOG_CFG.filePath) {
-    const fs = await _fs();
-    try {
-      await fs.mkdir(path.dirname(LOG_CFG.filePath), { recursive: true });
-    } catch {}
-  }
-}
-async function logLine(level, message) {
-  const lvlNum = _levelNum(level);
-  if (lvlNum > LOG_CFG.levelNum) return;
-  const ts = new Date().toISOString();
-  const line = `[${ts}] [${level.toUpperCase()}] ${message}\n`;
-  if (LOG_CFG.filePath) {
-    try {
-      const fs = await _fs();
-      await fs.appendFile(LOG_CFG.filePath, line, 'utf8');
-    } catch {}
-  }
-  // If no file is configured, print to stdout by default (terminal log)
-  if (!LOG_CFG.filePath && !LOG_CFG.toStderr && level !== 'error') {
-    try { process.stdout.write(line); } catch {}
-  } else {
-    // Errors always go to stderr; optionally mirror others to stderr
-    try { (level === 'error' || LOG_CFG.toStderr) && process.stderr.write(line); } catch {}
-  }
-}
-
-function isDebugLog() {
-  return LOG_CFG.levelNum >= LOG_LEVELS.debug;
 }
 
 function ensureString(v, name) {
@@ -571,7 +433,7 @@ async function optimizeResultsWithClaude({ query, candidates, model = DEFAULT_CL
     '短い理由も付けてください。',
     'JSONのみで返してください。',
     '{',
-    '  "recommendations": [
+    '  "recommendations": [',
     '    { "place_id": "...", "score": 0.0, "reason": "..." }',
     '  ]',
     '}',
@@ -620,7 +482,7 @@ async function optimizeResultsWithGemini({ query, candidates, model = DEFAULT_GE
     '短い理由も付けてください。',
     'JSONのみで返してください。',
     '{',
-    '  "recommendations": [
+    '  "recommendations": [',
     '    { "place_id": "...", "score": 0.0, "reason": "..." }',
     '  ]',
     '}',
@@ -736,7 +598,7 @@ async function summarizeTopWithClaude({ nl, items, model = DEFAULT_CLAUDE_MODEL,
     '  "name": "...",',
     '  "image_url": "..." | null,',
     '  "google_maps_url": "..." | null,',
-    '  "genres": ["..."],
+    '  "genres": ["..."]',
     '  "area": "...",',
     '  "reason": "..."  // 自然でキャッチーな日本語一文（30〜60文字）',
     '}',
@@ -837,8 +699,8 @@ async function parseUserQueryWithClaude(nl, { model = DEFAULT_CLAUDE_MODEL } = {
     '必ず以下のJSON形式のみで出力してください。',
     '以下のJSONのみを返してください。',
     '{',
-    '  "areas": ["..."],
-    '  "genres": ["..."],
+    '  "areas": ["..."]',
+    '  "genres": ["..."]',
     '  "price_bands": [ { "min_yen": 3000, "max_yen": 6000 } ],',
     '  "datetime": "YYYY-MM-DD HH:mm" | null,',
     '  "party_size": 5 | null,',
