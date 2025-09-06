@@ -45,7 +45,10 @@
       .choice.yes{ border-color: color-mix(in oklab, var(--yes) 40%, var(--line)); color: var(--yes); }
       .choice.maybe{ border-color: color-mix(in oklab, var(--maybe) 40%, var(--line)); color: var(--maybe); }
       .choice.no{ border-color: color-mix(in oklab, var(--no) 40%, var(--line)); color: var(--no); }
-      .choices input[type=radio]:checked + .choice{ background: rgba(255,255,255,.06); border-color: currentColor; box-shadow: inset 0 0 0 1px currentColor; color:#fff; }
+      /* Selected state: invert with theme color background and white glyph */
+      .choices input[type=radio]:checked + .choice.yes{ background: var(--yes); border-color: var(--yes); color:#fff; box-shadow:none; }
+      .choices input[type=radio]:checked + .choice.maybe{ background: var(--maybe); border-color: var(--maybe); color:#fff; box-shadow:none; }
+      .choices input[type=radio]:checked + .choice.no{ background: var(--no); border-color: var(--no); color:#fff; box-shadow:none; }
       .choices input[type=radio]:disabled + .choice{ opacity:.5; cursor:not-allowed; }
       .tally{ font-size:12px; color:var(--muted); text-align:right; white-space:nowrap; }
       /* Save bar */

@@ -168,14 +168,22 @@ async function handlePostback({ client, db, event }) {
 
   if (data.startsWith('close:')) {
     const [, pollId, yn] = data.split(':');
+    const d = db.getPoll(pollId);
+    if (!d) {
+      await safeReply(client, replyToken, [{ type: 'text', text: '対象の投票が見つかりませんでした。' }]);
+      return;
+    }
+    const { poll, options } = d;
+    // After someone answered 'yes', mark as 'closing' so further yes/no are ignored
+    if (poll.status === 'closing' || poll.status === 'closed') {
+      await safeReply(client, replyToken, [{ type: 'text', text: poll.status === 'closed' ? 'すでに確定済みです。' : 'すでに締切処理中です。' }]);
+      return;
+    }
+
     if (yn === 'yes') {
+      // switch to closing and offer choices
+      db.setPollStatus(pollId, 'closing');
       // Present candidate options as a Flex with buttons to finalize
-      const d = db.getPoll(pollId);
-      if (!d) {
-        await safeReply(client, replyToken, [{ type: 'text', text: '対象の投票が見つかりませんでした。' }]);
-        return;
-      }
-      const { poll, options } = d;
       const tally = db.getPollTally3(pollId);
       // Sort by yes desc, maybe desc, no asc
       const byId = new Map(tally.map((t) => [t.option_id, t]));
@@ -213,6 +221,7 @@ async function handlePostback({ client, db, event }) {
         flex,
       ]);
     } else {
+      // no は現状スルー（再通知はしない）。
       await safeReply(client, replyToken, [{ type: 'text', text: '了解しました。引き続き投票を受け付けます。' }]);
     }
     return;
@@ -224,6 +233,10 @@ async function handlePostback({ client, db, event }) {
       const d = db.getPoll(pollId);
       if (!d) throw new Error('poll_not_found');
       const { poll, options } = d;
+      if (poll.status === 'closed') {
+        await safeReply(client, replyToken, [{ type: 'text', text: 'すでに確定済みです。' }]);
+        return;
+      }
       const opt = options.find((o) => o.id === optionId);
       if (!opt) throw new Error('option_not_found');
       db.setPollStatus(pollId, 'closed');
