@@ -194,28 +194,16 @@ app.listen(PORT, () => {
 
 // Helpers
 async function getAllMemberIds(groupOrRoomId) {
-  // Try group first, then room
-  const out = [];
+  // Try group first, then room. SDK v9 returns string[] directly (pagination handled internally).
   try {
-    let start = undefined;
-    do {
-      const res = await client.getGroupMemberIds(groupOrRoomId, start);
-      if (!res) break;
-      out.push(...(res.memberIds || []));
-      start = res.next;
-    } while (start);
-    if (out.length) return out;
+    const ids = await client.getGroupMemberIds(groupOrRoomId);
+    if (Array.isArray(ids) && ids.length) return ids;
   } catch (_) {}
   try {
-    let start = undefined;
-    do {
-      const res = await client.getRoomMemberIds(groupOrRoomId, start);
-      if (!res) break;
-      out.push(...(res.memberIds || []));
-      start = res.next;
-    } while (start);
+    const ids = await client.getRoomMemberIds(groupOrRoomId);
+    if (Array.isArray(ids) && ids.length) return ids;
   } catch (_) {}
-  return out;
+  return [];
 }
 
 async function checkAndPromptClose({ pollId }) {
