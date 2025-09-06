@@ -1,5 +1,17 @@
-import axios from 'axios';
-import dayjs from 'dayjs';
+/**
+ * Suggest restaurants/izakaya candidates (5-6) using Google Places API.
+ * Input: JSON with date/time, area, genre (and optional options).
+ * Output: JSON list of suggested places with details and open-at-time flag.
+ *
+ * Requirements:
+ * - Node.js 18+ (global fetch available)
+ * - Env: GOOGLE_MAPS_API_KEY
+ * - Enable APIs: Places API, Geocoding API, Time Zone API
+ *
+ * Usage examples:
+ *   node scripts/suggest_places.js --input input.json
+ *   echo '{"dateTime":"2025-09-06 19:00","area":"渋谷駅","genre":"居酒屋"}' | node scripts/suggest_places.js
+ */
 
 // ------------------------- Config -------------------------
 const DEFAULT_LANGUAGE = 'ja';
@@ -12,6 +24,10 @@ const DEFAULT_STATION_SEARCH_RADIUS_M = 2000; // station lookup radius
 const DEFAULT_GEMINI_MODEL = 'gemini-1.5-flash';
 
 // ------------------------- Utils --------------------------
+import path from 'node:path';
+import axios from 'axios';
+import dayjs from 'dayjs';
+
 function assertEnv() {
   const key = process.env.GOOGLE_MAPS_API_KEY;
   if (!key) {
@@ -39,6 +55,129 @@ function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
+function parseCLIArgs() {
+  const args = process.argv.slice(2);
+  const out = { inputPath: null, nlText: null, logFile: null, logLevel: null, logStderr: null };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if ((a === '--input' || a === '-i') && i + 1 < args.length) {
+      out.inputPath = args[++i];
+    } else if ((a === '--nl' || a === '--text') && i + 1 < args.length) {
+      out.nlText = args[++i];
+    } else if (a === '--log-file' && i + 1 < args.length) {
+      out.logFile = args[++i];
+    } else if (a === '--log-level' && i + 1 < args.length) {
+      out.logLevel = args[++i];
+    } else if (a === '--log-stderr') {
+      out.logStderr = '1';
+    }
+  }
+  return out;
+}
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => (data += chunk));
+    process.stdin.on('end', () => resolve(data));
+    process.stdin.on('error', reject);
+  });
+}
+
+// Lightweight .env loader (no external dependency)
+async function loadDotEnv(path = '.env') {
+  try {
+    const fs = await import('node:fs/promises');
+    const raw = await fs.readFile(path, 'utf8');
+    const lines = raw.split(/\r?\n/);
+    for (let line of lines) {
+      if (!line) continue;
+      // Trim and drop comments/blank
+      line = line.trim();
+      if (!line || line.startsWith('#')) continue;
+      if (line.startsWith('export ')) line = line.slice(7).trim();
+
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      let value = line.slice(eq + 1).trim();
+
+      const isQuoted = (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"));
+      if (isQuoted) {
+        value = value.slice(1, -1);
+      } else {
+        // Remove inline comments starting with # if not quoted
+        const hashIdx = (() => {
+          for (let i = 0; i < value.length; i++) {
+            if (value[i] === '#') {
+              // Treat as comment if beginning or preceded by whitespace
+              if (i === 0 || /\s/.test(value[i - 1])) return i;
+            }
+          }
+          return -1;
+        })();
+        if (hashIdx >= 0) value = value.slice(0, hashIdx).trim();
+      }
+      // Unescape common sequences
+      value = value.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+
+      if (key && !(key in process.env)) {
+        process.env[key] = value;
+      }
+    }
+  } catch (e) {
+    // .env not found or unreadable: ignore silently
+  }
+}
+
+// ------------------------- Logging ------------------------
+const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
+let LOG_CFG = { filePath: null, toStderr: false, levelNum: LOG_LEVELS.info };
+let _fs_promises = null;
+async function _fs() {
+  if (_fs_promises) return _fs_promises;
+  _fs_promises = await import('node:fs/promises');
+  return _fs_promises;
+}
+function _levelNum(lvl) {
+  return LOG_LEVELS[(lvl || 'info').toLowerCase()] ?? LOG_LEVELS.info;
+}
+async function configureLogging({ filePath, level = 'info', toStderr = false } = {}) {
+  LOG_CFG.filePath = filePath || null;
+  LOG_CFG.toStderr = !!toStderr;
+  LOG_CFG.levelNum = _levelNum(level);
+  if (LOG_CFG.filePath) {
+    const fs = await _fs();
+    try {
+      await fs.mkdir(path.dirname(LOG_CFG.filePath), { recursive: true });
+    } catch {}
+  }
+}
+async function logLine(level, message) {
+  const lvlNum = _levelNum(level);
+  if (lvlNum > LOG_CFG.levelNum) return;
+  const ts = new Date().toISOString();
+  const line = `[${ts}] [${level.toUpperCase()}] ${message}\n`;
+  if (LOG_CFG.filePath) {
+    try {
+      const fs = await _fs();
+      await fs.appendFile(LOG_CFG.filePath, line, 'utf8');
+    } catch {}
+  }
+  // If no file is configured, print to stdout by default (terminal log)
+  if (!LOG_CFG.filePath && !LOG_CFG.toStderr && level !== 'error') {
+    try { process.stdout.write(line); } catch {}
+  } else {
+    // Errors always go to stderr; optionally mirror others to stderr
+    try { (level === 'error' || LOG_CFG.toStderr) && process.stderr.write(line); } catch {}
+  }
+}
+
+function isDebugLog() {
+  return LOG_CFG.levelNum >= LOG_LEVELS.debug;
+}
+
 function ensureString(v, name) {
   if (typeof v !== 'string' || !v.trim()) {
     throw new Error(`${name} must be a non-empty string`);
@@ -57,7 +196,7 @@ function parseLocalDateTime(s) {
   // Basic sanitization: trim, normalize colon, strip Japanese approximate markers
   let str = raw.trim()
     .replace(/[：]/g, ':') // full-width colon to half-width
-    .replace(/[\s]*(ごろ|頃)[　]*$/i, '');
+    .replace(/[\s]*(ごろ|頃)[\s]*$/i, '');
 
   // Accept general ISO-8601 strings if Date can parse and contains 'T'
   const dISO = new Date(str);
@@ -157,6 +296,25 @@ function mapGenreToTypeAndKeyword(genre) {
   return { type: 'restaurant', keyword: genre };
 }
 
+function splitList(str) {
+  if (typeof str !== 'string') return [];
+  return str
+    .split(/[、,\/|\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseGenres(primaryGenre, genresArr) {
+  if (Array.isArray(genresArr) && genresArr.length) {
+    return [...new Set(genresArr.map((g) => String(g).trim()).filter(Boolean))];
+  }
+  if (typeof primaryGenre === 'string') {
+    const list = splitList(primaryGenre);
+    if (list.length) return [...new Set(list)];
+  }
+  return primaryGenre ? [String(primaryGenre)] : [];
+}
+
 function priceLevelFromBudgetYen(minYen, maxYen) {
   // Rough mapping for JP contexts; adjust as desired
   if (maxYen == null && minYen == null) return null;
@@ -198,7 +356,7 @@ function inYenRange(priceLevel, rangeMin, rangeMax) {
   return !(band.max < rangeMin || band.min > rangeMax);
 }
 
-// ------------------------- Validation/Sanitization --------- 
+// ------------------------- Validation/Sanitization ---------
 function sanitizeNLPlan(raw) {
   const out = {
     areas: Array.isArray(raw.areas) ? raw.areas.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim()).slice(0, 3) : [],
@@ -244,7 +402,7 @@ async function googleGet(path, params) {
 }
 
 // ------------------------- Claude API ---------------------
-async function claudeMessagesJson({ system, user, model = DEFAULT_CLAUDE_MODEL, max_tokens = 30000, temperature = 0 }) {
+async function claudeMessagesJson({ system, user, model = DEFAULT_CLAUDE_MODEL, max_tokens = 512, temperature = 0 }) {
   const apiKey = getAnthropicKey();
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -259,6 +417,8 @@ async function claudeMessagesJson({ system, user, model = DEFAULT_CLAUDE_MODEL, 
       system,
       max_tokens,
       temperature,
+      // Ask for strict JSON when available on the API; harmless if ignored
+      // Anthropic structured output: enforce JSON response
       response_format: { type: 'json_object' },
       messages: [
         { role: 'user', content: user }
@@ -276,91 +436,6 @@ async function claudeMessagesJson({ system, user, model = DEFAULT_CLAUDE_MODEL, 
 
 // ------------------------- Gemini API ---------------------
 async function geminiGenerateJson({ system, user, model = DEFAULT_GEMINI_MODEL, maxOutputTokens = 30000, temperature = 0.1, responseSchema = null }) {
-  const apiKey = getGeminiKey();
-  if (!apiKey) throw new Error('GOOGLE_API_KEY (or GEMINI_API_KEY) is not set');
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  
-  const fullPrompt = `${system}\n\n${user}`;
-
-  const body = {
-    contents: [
-      { role: 'user', parts: [{ text: fullPrompt }] }
-    ],
-    generationConfig: {
-      temperature,
-      maxOutputTokens,
-      responseMimeType: 'application/json',
-      ...(responseSchema ? { responseSchema } : {}),
-    },
-  };
-
-  const res = await fetch(endpoint, {
-
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    throw new Error(`Gemini API error ${res.status}: ${t}`);
-  }
-  const data = await res.json();
-  const block = data?.promptFeedback?.blockReason;
-  if (block) {
-    throw new Error(`Gemini prompt blocked: ${block}`);
-  }
-  const parts = data?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts) || parts.length === 0) {
-    const finish = data?.candidates?.[0]?.finishReason || data?.candidates?.[0]?.finish_reason || 'UNKNOWN';
-    const safety = data?.candidates?.[0]?.safetyRatings || data?.candidates?.[0]?.safety_ratings || null;
-    const pf = data?.promptFeedback || null;
-    const meta = { finishReason: finish, safetyRatings: safety, promptFeedback: pf };
-    throw new Error(`Gemini returned no content: ${JSON.stringify(meta).slice(0,800)}`);
-  }
-  const text = parts.map(p => p?.text || '').join('').trim();
-  if (!text) {
-    throw new Error('Gemini returned empty text');
-  }
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    const snippet = text.slice(0, 300).replace(/\s+/g, ' ');
-    throw new Error(`Gemini JSON parse failed: ${e?.message || e}. First 300 chars: ${snippet}`);
-  }
-}
-
-// ---------------- Summarize final top via LLM ----------------
-async function summarizeTopWithClaude({ system, user, model = DEFAULT_CLAUDE_MODEL, max_tokens = 30000, temperature = 0 }) {
-  const apiKey = getAnthropicKey();
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model,
-      system,
-      max_tokens,
-      temperature,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'user', content: user }
-      ],
-    }),
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    throw new Error(`Claude API error ${res.status}: ${t}`);
-  }
-  const data = await res.json();
-  const content = Array.isArray(data.content) && data.content[0]?.type === 'text' ? data.content[0].text : '';
-  return JSON.parse(content);
-}
-
-async function summarizeTopWithGemini({ system, user, model = DEFAULT_GEMINI_MODEL, maxOutputTokens = 30000, temperature = 0.1, responseSchema = null }) {
   const apiKey = getGeminiKey();
   if (!apiKey) throw new Error('GOOGLE_API_KEY (or GEMINI_API_KEY) is not set');
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -410,23 +485,335 @@ async function summarizeTopWithGemini({ system, user, model = DEFAULT_GEMINI_MOD
   }
 }
 
-async function summarizeTopWithLLM({ nl, items, model = DEFAULT_CLAUDE_MODEL, language = DEFAULT_LANGUAGE }) {
-  if (!Array.isArray(items) || items.length === 0) {
-    throw new Error('Top-5 summarization failed: no items to summarize');
-  }
+async function normalizeAreaWithClaude(rawArea, { language = DEFAULT_LANGUAGE, region = DEFAULT_COUNTRY_REGION, model = DEFAULT_CLAUDE_MODEL } = {}) {
+  const system = 'You convert vague location descriptions in Japanese into a single, geocodable place string suitable for Google Geocoding. Output strictly valid JSON only (no extra text).';
+  const user = [
+    '入力のエリア表現を、Google Geocodingで解釈しやすい1つの地名や施設名に正規化してください。',
+    '例: 「渋谷の飲み屋街あたり」→「渋谷駅」や「渋谷センター街」など。',
+    '以下のJSONだけを返してください。',
+    '{',
+    '  "normalized_area": "...",',
+    '  "confidence": 0.0,',
+    '  "reason": "...",',
+    '  "alternatives": ["...", "..."]',
+    '}',
+    '',
+    `area: ${rawArea}`,
+    `language: ${language}`,
+    `region: ${region}`,
+  ].join('\n');
+  const json = await claudeMessagesJson({ system, user, model, max_tokens: 256, temperature: 0 });
+  const normalized = ensureString(json.normalized_area, 'normalized_area');
+  const confidence = typeof json.confidence === 'number' ? json.confidence : null;
+  const reason = typeof json.reason === 'string' ? json.reason : null;
+  const alternatives = Array.isArray(json.alternatives) ? json.alternatives.filter((s) => typeof s === 'string') : [];
+  return { normalized, confidence, reason, alternatives };
+}
+
+async function normalizeAreaWithGemini(rawArea, { language = DEFAULT_LANGUAGE, region = DEFAULT_COUNTRY_REGION, model = DEFAULT_GEMINI_MODEL } = {}) {
+  const system = 'You convert vague location descriptions in Japanese into a single, geocodable place string suitable for Google Geocoding. Return compact JSON only.';
+  const user = [
+    '入力のエリア表現を、Google Geocodingで解釈しやすい1つの地名や施設名に正規化してください。',
+    '例: 「渋谷の飲み屋街あたり」→「渋谷駅」や「渋谷センター街」など。',
+    '以下のJSONだけを返してください。',
+    '{',
+    '  "normalized_area": "...",',
+    '  "confidence": 0.0,',
+    '  "reason": "...",',
+    '  "alternatives": ["...", "..."]',
+    '}',
+    '',
+    `area: ${rawArea}`,
+    `language: ${language}`,
+    `region: ${region}`,
+  ].join('\n');
+  const json = await geminiGenerateJson({
+    system,
+    user,
+    model,
+    maxOutputTokens: 256,
+    responseSchema: {
+      type: 'OBJECT',
+      properties: {
+        normalized_area: { type: 'STRING' },
+        confidence: { type: 'NUMBER' },
+        reason: { type: 'STRING' },
+        alternatives: { type: 'ARRAY', items: { type: 'STRING' } },
+      },
+    },
+  });
+  const normalized = ensureString(json.normalized_area, 'normalized_area');
+  const confidence = typeof json.confidence === 'number' ? json.confidence : null;
+  const reason = typeof json.reason === 'string' ? json.reason : null;
+  const alternatives = Array.isArray(json.alternatives) ? json.alternatives.filter((s) => typeof s === 'string') : [];
+  return { normalized, confidence, reason, alternatives };
+}
+
+async function optimizeResultsWithClaude({ query, candidates, model = DEFAULT_CLAUDE_MODEL, maxReturn }) {
+  const system = 'You re-rank restaurant candidates for a Japanese user. Output strictly valid JSON only (no extra text).';
+  const payload = {
+    query,
+    candidates: candidates.map((c) => ({
+      place_id: c.place_id,
+      name: c.name,
+      rating: c.rating,
+      user_ratings_total: c.user_ratings_total,
+      price_level: c.price_level,
+      is_open: c.is_open_at_scheduled_time,
+      address: c.address,
+      types: c.types,
+    })),
+    maxReturn,
+  };
+  const user = [
+    '次の候補から最大 maxReturn 件を、ユーザー満足度が高くなる順に並べ替えてください。',
+    '重視: 指定時刻に営業中、評価値、レビュー件数、予算適合、ジャンル適合。',
+    '短い理由も付けてください。',
+    'JSONのみで返してください。',
+    '{',
+    '  "recommendations": [
+    '    { "place_id": "...", "score": 0.0, "reason": "..." }',
+    '  ]',
+    '}',
+    '',
+    JSON.stringify(payload, null, 0),
+  ].join('\n');
+  const json = await claudeMessagesJson({ system, user, model, max_tokens: 1024, temperature: 0 });
+  const recs = Array.isArray(json.recommendations) ? json.recommendations : [];
+  const byId = new Map(recs.filter(r => r && r.place_id).map(r => [r.place_id, r]));
+  const ordered = candidates
+    .slice()
+    .sort((a, b) => {
+      const ra = byId.get(a.place_id)?.score ?? -Infinity;
+      const rb = byId.get(b.place_id)?.score ?? -Infinity;
+      if (ra !== rb) return rb - ra;
+      return 0;
+    })
+    .filter(c => byId.has(c.place_id));
+  const top = ordered.slice(0, maxReturn).map((c) => ({
+    ...c,
+    claude_reason: byId.get(c.place_id)?.reason ?? null,
+    claude_score: byId.get(c.place_id)?.score ?? null,
+  }));
+  return { recommendations: top, raw: recs };
+}
+
+async function optimizeResultsWithGemini({ query, candidates, model = DEFAULT_GEMINI_MODEL, maxReturn }) {
+  const system = 'You re-rank restaurant candidates for a Japanese user. Output compact JSON only.';
+  const payload = {
+    query,
+    candidates: candidates.map((c) => ({
+      place_id: c.place_id,
+      name: c.name,
+      rating: c.rating,
+      user_ratings_total: c.user_ratings_total,
+      price_level: c.price_level,
+      is_open: c.is_open_at_scheduled_time,
+      address: c.address,
+      types: c.types,
+    })),
+    maxReturn,
+  };
+  const user = [
+    '次の候補から最大 maxReturn 件を、ユーザー満足度が高くなる順に並べ替えてください。',
+    '重視: 指定時刻に営業中、評価値、レビュー件数、予算適合、ジャンル適合。',
+    '短い理由も付けてください。',
+    'JSONのみで返してください。',
+    '{',
+    '  "recommendations": [
+    '    { "place_id": "...", "score": 0.0, "reason": "..." }',
+    '  ]',
+    '}',
+    '',
+    JSON.stringify(payload, null, 0),
+  ].join('\n');
+  const json = await geminiGenerateJson({
+    system,
+    user,
+    model,
+    maxOutputTokens: 1024,
+    temperature: 0,
+    responseSchema: {
+      type: 'OBJECT',
+      properties: {
+        recommendations: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              place_id: { type: 'STRING' },
+              score: { type: 'NUMBER' },
+              reason: { type: 'STRING' },
+            },
+          },
+        },
+      },
+    },
+  });
+  const recs = Array.isArray(json.recommendations) ? json.recommendations : [];
+  const byId = new Map(recs.filter(r => r && r.place_id).map(r => [r.place_id, r]));
+  const ordered = candidates
+    .slice()
+    .sort((a, b) => {
+      const ra = byId.get(a.place_id)?.score ?? -Infinity;
+      const rb = byId.get(b.place_id)?.score ?? -Infinity;
+      if (ra !== rb) return rb - ra;
+      return 0;
+    })
+    .filter(c => byId.has(c.place_id));
+  const top = ordered.slice(0, maxReturn).map((c) => ({
+    ...c,
+    llm_reason: byId.get(c.place_id)?.reason ?? null,
+    llm_score: byId.get(c.place_id)?.score ?? null,
+  }));
+  return { recommendations: top, raw: recs };
+}
+
+// ------------------------- LLM wrappers -------------------
+async function normalizeAreaWithLLM(rawArea, { language, region, claudeModel = DEFAULT_CLAUDE_MODEL, geminiModel = DEFAULT_GEMINI_MODEL } = {}) {
   const errors = [];
   if (getAnthropicKey()) {
     try {
-      const r = await summarizeTopWithClaude({ nl, items, model, language });
-      return { ...r, _provider: 'claude', _model: model };
+      const r = await normalizeAreaWithClaude(rawArea, { language, region, model: claudeModel });
+      return { ...r, _provider: 'claude', _model: claudeModel };
     } catch (e) {
       errors.push(`Claude: ${e?.message || e}`);
     }
   }
   if (getGeminiKey()) {
     try {
-      const r = await summarizeTopWithGemini({ nl, items, model, language });
-      return { ...r, _provider: 'gemini', _model: model };
+      const r = await normalizeAreaWithGemini(rawArea, { language, region, model: geminiModel });
+      return { ...r, _provider: 'gemini', _model: geminiModel };
+    } catch (e) {
+      errors.push(`Gemini: ${e?.message || e}`);
+    }
+  }
+  throw new Error(`Area normalization failed. ${errors.join(' | ') || 'No LLM API key configured.'}`);
+}
+
+async function optimizeResultsWithLLM({ query, candidates, claudeModel = DEFAULT_CLAUDE_MODEL, geminiModel = DEFAULT_GEMINI_MODEL, maxReturn }) {
+  const errors = [];
+  if (getAnthropicKey()) {
+    try {
+      const r = await optimizeResultsWithClaude({ query, candidates, model: claudeModel, maxReturn });
+      return { ...r, _provider: 'claude', _model: claudeModel };
+    } catch (e) {
+      errors.push(`Claude: ${e?.message || e}`);
+    }
+  }
+  if (getGeminiKey()) {
+    try {
+      const r = await optimizeResultsWithGemini({ query, candidates, model: geminiModel, maxReturn });
+      return { ...r, _provider: 'gemini', _model: geminiModel };
+    } catch (e) {
+      errors.push(`Gemini: ${e?.message || e}`);
+    }
+  }
+  throw new Error(`Results optimization failed. ${errors.join(' | ') || 'No LLM API key configured.'}`);
+}
+
+// ---------------- Summarize final top via LLM ----------------
+async function summarizeTopWithClaude({ nl, items, model = DEFAULT_CLAUDE_MODEL, language = DEFAULT_LANGUAGE }) {
+  const system = 'From up to 10 restaurant candidates, pick at most 5 best recommendations for a Japanese user. Output strictly valid JSON only (no code fences, no preface). For each picked item, write a single catchy Japanese sentence (about 30-60 chars) as the reason, reflecting the user intent (time, party size, genre, budget). No bullet lists, no slashes.';
+  const payload = {
+    nl,
+    items: items.map((x) => ({
+      name: x.name,
+      image_url: x.image_url,
+      google_maps_url: x.google_maps_url,
+      genres: Array.isArray(x.matched_genres) ? x.matched_genres : [],
+      areas: Array.isArray(x.source_areas) ? x.source_areas : [],
+      reason_short: x.reason_short || null,
+      rating: x.rating ?? null,
+      user_ratings_total: x.user_ratings_total ?? null,
+    })),
+    language,
+  };
+  const user = [
+    '以下の候補（最大10件）から、最大5件を選んで構造化JSONで返してください。',
+    '各要素は以下の形式です。',
+    '{',
+    '  "name": "...",',
+    '  "image_url": "..." | null,',
+    '  "google_maps_url": "..." | null,',
+    '  "genres": ["..."],
+    '  "area": "...",',
+    '  "reason": "..."  // 自然でキャッチーな日本語一文（30〜60文字）',
+    '}',
+    '',
+    'reasonはユーザー入力と店舗属性（営業時間・評価・レビュー数・価格帯・ジャンル・エリア）に基づき、口語的で魅力的に。',
+    JSON.stringify(payload, null, 0),
+  ].join('\n');
+  if (isDebugLog()) {
+    await logLine('debug', `[llm-summarize] claude items=${items.length} nl_len=${String(nl||'').length}`);
+  }
+  const json = await claudeMessagesJson({ system, user, model, max_tokens: 1024, temperature: 0 });
+  return json; // expect { recommendations: [ {name, image_url, google_maps_url, genres, area, reason} ] }
+}
+
+async function summarizeTopWithGemini({ nl, items, model = DEFAULT_GEMINI_MODEL, language = DEFAULT_LANGUAGE }) {
+  const system = 'From up to 10 restaurant candidates, pick at most 5 best recommendations for a Japanese user. Output strictly JSON matching the response schema (no additional text). For each picked item, produce a single catchy Japanese sentence (about 30-60 chars) as reason, reflecting user intent (time, party size, genre, budget). No bullet lists.';
+  const payload = {
+    nl,
+    items: items.map((x) => ({
+      name: x.name,
+      image_url: x.image_url,
+      google_maps_url: x.google_maps_url,
+      genres: Array.isArray(x.matched_genres) ? x.matched_genres : [],
+      areas: Array.isArray(x.source_areas) ? x.source_areas : [],
+      reason_short: x.reason_short || null,
+      rating: x.rating ?? null,
+      user_ratings_total: x.user_ratings_total ?? null,
+    })),
+    language,
+  };
+  const user = JSON.stringify(payload, null, 0);
+  if (isDebugLog()) {
+    await logLine('debug', `[llm-summarize] gemini items=${items.length} nl_len=${String(nl||'').length}`);
+  }
+  const responseSchema = {
+    type: 'OBJECT',
+    properties: {
+      recommendations: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            name: { type: 'STRING' },
+            image_url: { type: 'STRING' },
+            google_maps_url: { type: 'STRING' },
+            genres: { type: 'ARRAY', items: { type: 'STRING' } },
+            area: { type: 'STRING' },
+            reason: { type: 'STRING' },
+          },
+        },
+      },
+    },
+  };
+  const json = await geminiGenerateJson({ system, user, model, maxOutputTokens: 30000, temperature: 0, responseSchema });
+  if (isDebugLog()) {
+    await logLine('debug', `[llm-summarize] gemini ok recs=${Array.isArray(json?.recommendations) ? json.recommendations.length : 0}`);
+  }
+  return json;
+}
+
+async function summarizeTopWithLLM({ nl, items, claudeModel = DEFAULT_CLAUDE_MODEL, geminiModel = DEFAULT_GEMINI_MODEL, language = DEFAULT_LANGUAGE }) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('Top-5 summarization failed: no items to summarize');
+  }
+  const errors = [];
+  if (getAnthropicKey()) {
+    try {
+      const r = await summarizeTopWithClaude({ nl, items, model: claudeModel, language });
+      return { ...r, _provider: 'claude', _model: claudeModel };
+    } catch (e) {
+      errors.push(`Claude: ${e?.message || e}`);
+    }
+  }
+  if (getGeminiKey()) {
+    try {
+      const r = await summarizeTopWithGemini({ nl, items, model: geminiModel, language });
+      return { ...r, _provider: 'gemini', _model: geminiModel };
     } catch (e) {
       errors.push(`Gemini: ${e?.message || e}`);
     }
@@ -450,8 +837,8 @@ async function parseUserQueryWithClaude(nl, { model = DEFAULT_CLAUDE_MODEL } = {
     '必ず以下のJSON形式のみで出力してください。',
     '以下のJSONのみを返してください。',
     '{',
-    '  "areas": ["..."],',
-    '  "genres": ["..."],',
+    '  "areas": ["..."],
+    '  "genres": ["..."],
     '  "price_bands": [ { "min_yen": 3000, "max_yen": 6000 } ],',
     '  "datetime": "YYYY-MM-DD HH:mm" | null,',
     '  "party_size": 5 | null,',
@@ -461,7 +848,7 @@ async function parseUserQueryWithClaude(nl, { model = DEFAULT_CLAUDE_MODEL } = {
     '',
     `ユーザー入力: ${nl}`,
   ].join('\n');
-  return claudeMessagesJson({ system, user, model, max_tokens: 30000, temperature: 0 });
+  return claudeMessagesJson({ system, user, model, max_tokens: 512, temperature: 0 });
 }
 
 async function parseUserQueryWithGemini(nl, { model = DEFAULT_GEMINI_MODEL } = {}) {
@@ -493,7 +880,7 @@ async function parseUserQueryWithGemini(nl, { model = DEFAULT_GEMINI_MODEL } = {
       openAtStrict: { type: 'BOOLEAN' },
     },
   };
-  const json = await geminiGenerateJson({ system, user, model, maxOutputTokens: 30000, temperature: 0, responseSchema });
+  const json = await geminiGenerateJson({ system, user, model, maxOutputTokens: 512, temperature: 0, responseSchema });
   return json;
 }
 
@@ -531,7 +918,7 @@ export async function suggestPlacesFromNL(nl, { language = DEFAULT_LANGUAGE, pre
   const maxPerCombo = 5;
 
   let openAtStrict = !!plan.openAtStrict;
-  let dateTime = (plan.datetime && String(plan.datetime).trim() ? String(plan.datetime).trim() : null) || date;
+  let dateTime = plan.datetime && String(plan.datetime).trim() ? String(plan.datetime).trim() : null;
   let parsedDT = null;
   if (dateTime) {
     const { year, month, day, hour, minute } = parseLocalDateTime(dateTime);
@@ -635,11 +1022,7 @@ export async function suggestPlacesFromNL(nl, { language = DEFAULT_LANGUAGE, pre
 
   const top10 = aggregated.slice(0, 10);
   if (top10.length === 0) {
-    return {
-      nl: nl,
-      nl_plan: {},
-      top5_structured: { recommendations: [] }
-    };
+    throw new Error('Top-5 summarization failed: no items to summarize');
   }
   const topSummary = await summarizeTopWithLLM({ nl, items: top10, language: language });
 
@@ -703,44 +1086,13 @@ function haversineMeters(a, b) {
   return R * c;
 }
 
-async function findPlaceAny(text, { language = DEFAULT_LANGUAGE } = {}) {
-  const fields = 'place_id,name,formatted_address,types,geometry'.split(',');
-  const params = {
-    input: text,
-    inputtype: 'textquery',
-    language,
-    fields: fields.join(','),
-  };
-  const data = await googleGet('/maps/api/place/findplacefromtext/json', params);
-  if (data.status !== 'OK' || !Array.isArray(data.candidates) || data.candidates.length === 0) return null;
-  const top = data.candidates[0];
-  if (!top?.geometry?.location) return null;
-  return {
-    source: 'findplace_any',
-    place_id: top.place_id,
-    name: top.name,
-    address: top.formatted_address,
-    location: top.geometry.location,
-    types: top.types || [],
-  };
-}
-
-async function resolveStationCenter({ areaText, geocode, language = DEFAULT_LANGUAGE, radius = DEFAULT_STATION_SEARCH_RADIUS_M }) {
-  // No fallbacks: must resolve a station via Find Place near geocoded center
-  const fp = await findPlaceStation(areaText, geocode.lat, geocode.lng, { language, radius });
-  if (fp && isStationTypes(fp.types)) {
-    return { ...fp, distance_m: haversineMeters(geocode, fp.location) };
-  }
-  throw new Error(`Failed to resolve station center for area "${areaText}"`);
-}
-
 async function findPlaceStation(text, biasLat, biasLng, { language = DEFAULT_LANGUAGE, radius = DEFAULT_STATION_SEARCH_RADIUS_M } = {}) {
-  const fields = 'place_id,name,formatted_address,types,geometry'.split(',');
+  const fields = ['place_id', 'name', 'formatted_address', 'types', 'geometry'].join(',');
   const params = {
     input: text,
     inputtype: 'textquery',
     language,
-    fields: fields.join(','),
+    fields,
   };
   if (Number.isFinite(biasLat) && Number.isFinite(biasLng)) {
     params.locationbias = `circle:${radius}@${biasLat},${biasLng}`;
@@ -753,6 +1105,29 @@ async function findPlaceStation(text, biasLat, biasLng, { language = DEFAULT_LAN
   if (!top?.geometry?.location) return null;
   return {
     source: 'findplace',
+    place_id: top.place_id,
+    name: top.name,
+    address: top.formatted_address,
+    location: top.geometry.location,
+    types: top.types || [],
+  };
+}
+
+// Find Place without requiring station types; returns top candidate with geometry if available
+async function findPlaceAny(text, { language = DEFAULT_LANGUAGE } = {}) {
+  const fields = ['place_id', 'name', 'formatted_address', 'types', 'geometry'].join(',');
+  const params = {
+    input: text,
+    inputtype: 'textquery',
+    language,
+    fields,
+  };
+  const data = await googleGet('/maps/api/place/findplacefromtext/json', params);
+  if (data.status !== 'OK' || !Array.isArray(data.candidates) || data.candidates.length === 0) return null;
+  const top = data.candidates[0];
+  if (!top?.geometry?.location) return null;
+  return {
+    source: 'findplace_any',
     place_id: top.place_id,
     name: top.name,
     address: top.formatted_address,
@@ -780,13 +1155,13 @@ async function nearbyStations(lat, lng, { language = DEFAULT_LANGUAGE, radius = 
   return results;
 }
 
-async function timezoneInfo(lat, lng, timestampSec) {
-  const data = await googleGet('/maps/api/timezone/json', {
-    location: `${lat},${lng}`,
-    timestamp: String(timestampSec),
-  });
-  if (data.status !== 'OK') throw new Error(`Time Zone API failed: ${data.status}`);
-  return data; // { timeZoneId, rawOffset, dstOffset }
+async function resolveStationCenter({ areaText, geocode, language = DEFAULT_LANGUAGE, radius = DEFAULT_STATION_SEARCH_RADIUS_M }) {
+  // No fallbacks: must resolve a station via Find Place near geocoded center
+  const fp = await findPlaceStation(areaText, geocode.lat, geocode.lng, { language, radius });
+  if (fp && isStationTypes(fp.types)) {
+    return { ...fp, distance_m: haversineMeters(geocode, fp.location) };
+  }
+  throw new Error(`Failed to resolve station center for area "${areaText}"`);
 }
 
 async function nearbySearch({ lat, lng, radius, type, keyword, language = DEFAULT_LANGUAGE, price_level = null, maxPages = 2 }) {
@@ -796,8 +1171,10 @@ async function nearbySearch({ lat, lng, radius, type, keyword, language = DEFAUL
     type,
     keyword,
     language,
+    // rankby not used because radius present; prominence is fine
   };
   if (price_level != null) {
+    // Nearby Search supports minprice/maxprice 0..4
     paramsBase.minprice = String(Math.max(0, Math.min(4, price_level - 1)));
     paramsBase.maxprice = String(Math.max(0, Math.min(4, price_level)));
   }
@@ -840,13 +1217,224 @@ async function placeDetails(placeId, { language = DEFAULT_LANGUAGE } = {}) {
   return data.result;
 }
 
-function computeScore(d, { genres, preferOpen }) {
+// Optional: get timezone info for location and timestamp (seconds since epoch)
+async function timezoneInfo(lat, lng, timestampSec) {
+  const data = await googleGet('/maps/api/timezone/json', {
+    location: `${lat},${lng}`,
+    timestamp: String(timestampSec),
+  });
+  if (data.status !== 'OK') throw new Error(`Time Zone API failed: ${data.status}`);
+  return data; // { timeZoneId, rawOffset, dstOffset }
+}
+
+// ------------------------- Core logic ---------------------
+async function suggestPlaces(input) {
+  const {
+    dateTime,
+    area,
+    areas,
+    genre,
+    genres,
+    language = DEFAULT_LANGUAGE,
+    radius_m = DEFAULT_RADIUS_M,
+    maxResults = DEFAULT_MAX_RESULTS,
+    budget_yen_min = null,
+    budget_yen_max = null,
+    openAtStrict = true,
+    useClaudeAreaNormalization = false,
+    useClaudeResultOptimization = false,
+    claudeModel = DEFAULT_CLAUDE_MODEL,
+    preferStationCenter = true,
+    station_search_radius_m = DEFAULT_STATION_SEARCH_RADIUS_M,
+    mixPrice_3000_6000 = true,
+    includePhotoUrl = true,
+  } = input;
+
+  ensureString(dateTime, 'dateTime');
+  if (!area && !areas) throw new Error('Provide area or areas');
+  ensureString(genre, 'genre');
+
+  const { year, month, day, hour, minute } = parseLocalDateTime(dateTime);
+  const dow = dayOfWeekFromDate(year, month, day); // 0..6
+  const minutesOfDay = hour * 60 + minute;
+
+  // Build areas list (supports multiple place names)
+  const areaList = Array.isArray(areas) && areas.length
+    ? areas
+    : (typeof area === 'string' ? area.split(/[、,\/|]/).map(s => s.trim()).filter(Boolean) : []);
+
+  const perAreaMeta = [];
+  const searchCenters = [];
+  for (const areaText of areaList) {
+    let normalized = areaText;
+    let normInfo = null;
+    if (useClaudeAreaNormalization) {
+      const norm = await normalizeAreaWithLLM(areaText, { language, region: DEFAULT_COUNTRY_REGION, claudeModel, geminiModel: DEFAULT_GEMINI_MODEL });
+      normalized = norm.normalized;
+      normInfo = { provider: norm._provider, model: norm._model, confidence: norm.confidence, reason: norm.reason, alternatives: norm.alternatives };
+    }
+    const geocoded = await geocodeArea(normalized, { language });
+    let searchCenter = { lat: geocoded.lat, lng: geocoded.lng };
+    let stationInfo = null;
+    if (preferStationCenter) {
+      const resolved = await resolveStationCenter({ areaText: normalized, geocode: geocoded, language, radius: Math.max(300, toInt(station_search_radius_m, DEFAULT_STATION_SEARCH_RADIUS_M)) });
+      if (resolved?.location) {
+        searchCenter = { lat: resolved.location.lat, lng: resolved.location.lng };
+        stationInfo = resolved;
+      } else {
+        throw new Error(`Station resolution returned no location for area "${normalized}"`);
+      }
+    }
+    perAreaMeta.push({ input: areaText, normalized, geocoded, stationInfo, info: normInfo });
+    searchCenters.push({ center: searchCenter, areaText: normalized });
+  }
+
+  const desired = Math.max(3, Math.min(10, toInt(maxResults, DEFAULT_MAX_RESULTS)));
+  const priceLevel = priceLevelFromBudgetYen(budget_yen_min, budget_yen_max);
+  const genreList = parseGenres(genre, genres);
+  const finalGenreList = genreList.length ? genreList : (genre ? [genre] : ['居酒屋']);
+
+  // Aggregate nearby results across all centers and genres
+  const candidatesRaw = [];
+  for (const sc of searchCenters) {
+    for (const gLabel of finalGenreList) {
+      const { type, keyword } = mapGenreToTypeAndKeyword(gLabel);
+      const part = await nearbySearch({
+        lat: sc.center.lat,
+        lng: sc.center.lng,
+        radius: Math.max(300, toInt(radius_m, DEFAULT_RADIUS_M)),
+        type,
+        keyword,
+        language,
+        price_level: priceLevel,
+        maxPages: 1,
+      });
+      for (const r of part) {
+        r._source_area = sc.areaText;
+        r._matched_genres = [gLabel];
+      }
+      candidatesRaw.push(...part);
+    }
+  }
+
+  // Deduplicate by place_id and keep OPERATIONAL
+  const uniqMap = new Map();
+  for (const r of candidatesRaw) {
+    if (!r.place_id) continue;
+    if (r.business_status && r.business_status !== 'OPERATIONAL') continue;
+    if (!uniqMap.has(r.place_id)) {
+      const sources = new Set();
+      if (r._source_area) sources.add(r._source_area);
+      const gset = new Set();
+      if (Array.isArray(r._matched_genres)) r._matched_genres.forEach((x) => gset.add(x));
+      uniqMap.set(r.place_id, { ...r, _hit_count: 1, _sources: sources, _matched_genres_set: gset });
+    } else {
+      const cur = uniqMap.get(r.place_id);
+      cur._hit_count = (cur._hit_count || 1) + 1;
+      if (r._source_area) cur._sources?.add?.(r._source_area);
+      if (Array.isArray(r._matched_genres)) r._matched_genres.forEach((x) => cur._matched_genres_set?.add?.(x));
+    }
+  }
+  const uniqList = Array.from(uniqMap.values());
+
+  // Pull details for a larger pool then filter/sort
+  const poolSize = Math.min(uniqList.length, Math.max(desired * CANDIDATE_FETCH_MULTIPLIER, 20));
+  const pool = uniqList.slice(0, poolSize);
+
+  const detailed = [];
+  for (const r of pool) {
+    const d = await placeDetails(r.place_id, { language });
+    detailed.push(d);
+  }
+
+  // Compute open-at-time flag
+  const enriched = detailed.map((d) => {
+    const open = isOpenAtTime(d.opening_hours?.periods, dow, minutesOfDay);
+    const base = computeScore(d, { genres: finalGenreList, preferOpen: !openAtStrict || open === true });
+    const hitBoost = Math.min(0.6, Math.max(0, (uniqMap.get(d.place_id)?._hit_count || 1) - 1) * 0.2);
+    return { d, openAtTime: open, score: base + hitBoost };
+  });
+
+  // Filter by openAtStrict if requested
+  let filtered = enriched;
+  if (openAtStrict) {
+    filtered = enriched.filter((e) => e.openAtTime === true);
+  }
+
+  // Sort: open first, then score desc, then ratings desc
+  filtered.sort((a, b) => {
+    const oa = a.openAtTime === true ? 1 : 0;
+    const ob = b.openAtTime === true ? 1 : 0;
+    if (oa !== ob) return ob - oa;
+    if (b.score !== a.score) return b.score - a.score;
+    const ar = a.d.rating ?? 0;
+    const br = b.d.rating ?? 0;
+    if (br !== ar) return br - ar;
+    const at = a.d.user_ratings_total ?? 0;
+    const bt = b.d.user_ratings_total ?? 0;
+    return bt - at;
+  });
+
+  // Create outputs with extras, then optionally enforce a 3000-6000 JPY price mix
+  const allOutputs = filtered.map(({ d, openAtTime }) => {
+    const meta = uniqMap.get(d.place_id) || {};
+    const extras = {
+      matched_genres: Array.from(meta._matched_genres_set || []),
+      source_areas: Array.from(meta._sources || []),
+      hit_count: meta._hit_count || 1,
+    };
+    return toOutput(d, openAtTime, { dow, minutesOfDay }, { includePhotoUrl, extras });
+  });
+  let picks;
+  if (mixPrice_3000_6000) {
+    picks = selectWithGenreAndPriceMix(allOutputs, desired, { genresPriority: finalGenreList, minYen: 3000, maxYen: 6000 });
+  } else {
+    picks = allOutputs.slice(0, desired);
+  }
+
+  let llmUsed = null;
+  let llmModel = null;
+  if (useClaudeResultOptimization && picks.length > 0) {
+    const opt = await optimizeResultsWithLLM({
+      query: { dateTime, areas: perAreaMeta.map(a => a.geocoded.formatted), genres: (finalGenreList || []), language },
+      candidates: picks,
+      claudeModel,
+      geminiModel: DEFAULT_GEMINI_MODEL,
+      maxReturn: desired,
+    });
+    if (opt?.recommendations?.length) {
+      picks = opt.recommendations;
+      llmUsed = opt._provider;
+      llmModel = opt._model;
+    } else {
+      throw new Error('LLM optimization returned no recommendations');
+    }
+  }
+
+  return {
+    query: { dateTime, parsed: { year, month, day, hour, minute, dow }, area: perAreaMeta[0]?.geocoded.formatted, areas: perAreaMeta.map(a => a.geocoded.formatted), genres: finalGenreList, language, radius_m },
+    area_normalization: useClaudeAreaNormalization ? perAreaMeta.map(a => ({ input: a.input, used_area: a.normalized, info: a.info })) : undefined,
+    // Present only when LLM optimization successfully ran
+    claude_optimization: llmUsed ? { used: true, provider: llmUsed, model: llmModel, size_in: picks.length } : undefined,
+    station_center: preferStationCenter ? perAreaMeta.map(a => ({
+      input: a.input,
+      normalized: a.normalized,
+      geocoded_center: { lat: a.geocoded.lat, lng: a.geocoded.lng },
+      station: a.stationInfo,
+      radius_m: station_search_radius_m,
+    })) : undefined,
+    results: picks,
+  };
+}
+
+function computeScore(d, { genre, keyword, genres, preferOpen }) {
   let s = 0;
   const name = (d.name || '').toLowerCase();
   const types = Array.isArray(d.types) ? d.types.join(' ') : '';
   const rating = d.rating ?? 0;
   const count = d.user_ratings_total ?? 0;
-
+  if (keyword && name.includes(String(keyword).toLowerCase())) s += 1.0;
+  if (genre && name.includes(String(genre).toLowerCase())) s += 0.6;
   if (Array.isArray(genres) && genres.length) {
     const gl = genres.map((g) => String(g).toLowerCase());
     let matches = 0;
@@ -869,6 +1457,45 @@ function photoUrlFromRef(photoRef, { maxwidth = 800 } = {}) {
   if (!key) return null;
   const usp = new URLSearchParams({ maxwidth: String(maxwidth), photo_reference: photoRef, key });
   return `https://maps.googleapis.com/maps/api/place/photo?${usp.toString()}`;
+}
+
+function formatPriceBand(price_level) {
+  const band = priceLevelIndicativeYen(price_level);
+  if (!band) return null;
+  if (band.min === 0 && band.max === 1000) return '〜¥1,000';
+  if (band.max >= 999999) return '¥12,000〜';
+  return `¥${band.min.toLocaleString()}〜¥${band.max.toLocaleString()}`;
+}
+
+function buildReasonShort({ name, rating, user_ratings_total, is_open_at_scheduled_time, price_level, matched_genres = [], source_areas = [], hit_count }) {
+  const bits = [];
+  if (is_open_at_scheduled_time === true) bits.push('指定時刻に営業中');
+  if (rating != null && user_ratings_total != null) bits.push(`評価${rating.toFixed(1)}(${user_ratings_total}件)`);
+  const pb = formatPriceBand(price_level);
+  if (pb) bits.push(`価格帯${pb}`);
+  if (Array.isArray(matched_genres) && matched_genres.length) bits.push(`ジャンル: ${matched_genres.slice(0,2).join('/')}`);
+  if ((hit_count || 0) > 1) bits.push('複数エリアでヒット');
+  return bits.slice(0, 3).join('・');
+}
+
+function buildReasonCatchy(item) {
+  try {
+    const time = item?.schedule_context?.time_local || null;
+    const open = item?.is_open_at_scheduled_time === true;
+    const rating = item?.rating;
+    const count = item?.user_ratings_total;
+    const genre = Array.isArray(item?.matched_genres) && item.matched_genres.length ? item.matched_genres[0] : null;
+    const pb = formatPriceBand(item?.price_level);
+    const parts = [];
+    if (open && time) parts.push(`${time}も営業中`);
+    if (rating != null && count != null) parts.push(`評価${rating.toFixed(1)}・${count}件`);
+    if (pb) parts.push(`予算${pb}目安`);
+    if (genre) parts.push(`${genre}好きに`);
+    const s = parts.join('、');
+    return s ? `${s}にちょうど良さそう。` : '立地・評価・予算のバランスが良く、使いやすい一軒です。';
+  } catch {
+    return '雰囲気と利便性のバランスが良い一軒です。';
+  }
 }
 
 function toOutput(d, openAtTime, { dow, minutesOfDay }, { includePhotoUrl = true, extras = {} } = {}) {
@@ -908,25 +1535,6 @@ function toOutput(d, openAtTime, { dow, minutesOfDay }, { includePhotoUrl = true
   };
   const reason = buildReasonShort({ ...base, hit_count });
   return { ...base, reason_short: reason };
-}
-
-function formatPriceBand(price_level) {
-  const band = priceLevelIndicativeYen(price_level);
-  if (!band) return null;
-  if (band.min === 0 && band.max === 1000) return '〜¥1,000';
-  if (band.max >= 999999) return '¥12,000〜';
-  return `¥${band.min.toLocaleString()}〜¥${band.max.toLocaleString()}`;
-}
-
-function buildReasonShort({ name, rating, user_ratings_total, is_open_at_scheduled_time, price_level, matched_genres = [], source_areas = [], hit_count }) {
-  const bits = [];
-  if (is_open_at_scheduled_time === true) bits.push('指定時刻に営業中');
-  if (rating != null && user_ratings_total != null) bits.push(`評価${rating.toFixed(1)}(${user_ratings_total}件)`);
-  const pb = formatPriceBand(price_level);
-  if (pb) bits.push(`価格帯${pb}`);
-  if (Array.isArray(matched_genres) && matched_genres.length) bits.push(`ジャンル: ${matched_genres.slice(0,2).join('/')}`);
-  if ((hit_count || 0) > 1) bits.push('複数エリアでヒット');
-  return bits.slice(0, 3).join('・');
 }
 
 // Favor items whose price_level implies 3000-6000 JPY, with graceful fallback
@@ -997,3 +1605,4 @@ function selectWithGenreAndPriceMix(items, desired, { genresPriority = [], minYe
   }
   return result.slice(0, desired);
 }
+
