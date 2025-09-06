@@ -4,7 +4,8 @@ import crypto from 'crypto';
 import axios from 'axios';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash';
+// Default to the image-preview capable model per request
+const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image-preview';
 
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -60,4 +61,3 @@ export function buildMascotInstruction({ context, stage }) {
   if (motifs.length === 0) motifs.push('幹助くんが明るくフレンドリーに案内している');
   return `${motifs.join('、')}。ベース画像のキャラクター性を維持して、スタンプ風の一枚絵にしてください。`;
 }
-
