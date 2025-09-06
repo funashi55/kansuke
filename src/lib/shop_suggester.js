@@ -646,6 +646,18 @@ function isStationTypes(types) {
   );
 }
 
+function haversineMeters(a, b) {
+  const R = 6371000;
+  const toRad = (x) => (x * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const s1 = Math.sin(dLat / 2);
+  const s2 = Math.sin(dLng / 2);
+  const aa = s1 * s1 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * s2 * s2;
+  const c = 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
+  return R * c;
+}
+
 async function findPlaceAny(text, { language = DEFAULT_LANGUAGE } = {}) {
   const fields = 'place_id,name,formatted_address,types,geometry'.split(',');
   const params = {

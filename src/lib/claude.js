@@ -32,15 +32,15 @@ Rules:
 - Prefer upcoming/future dates but do not guess; avoid speculative inference.
 - Output strictly JSON array: [{"date":"YYYY-MM-DD","label":"M/D(曜)"}, ...]
 - Use Japanese weekday like (月)(火)(水)(木)(金)(土)(日)
-- Max 10 items, sorted ascending by date.
+- Max 30 items, sorted ascending by date.
 - If dates are not explicit or clear, output [] (no extra text).`;
     const user = `リクエスト: ${query}\n明確に指定された候補日が無ければ空配列[]を返してください。`;
     try {
       const resp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
-          model: 'claude-3-7-sonnet-20250219',
-          max_tokens: 400,
+          model: 'claude-3-5-sonnet-20240620',
+          max_tokens: 1024,
           temperature: 0,
           system,
           messages: [{ role: 'user', content: user }],
@@ -60,7 +60,7 @@ Rules:
       if (!Array.isArray(arr)) throw new Error('Claude did not return an array');
       const candidates = arr
         .filter((x) => x?.date)
-        .slice(0, 10)
+        .slice(0, 30)
         .map((x) => ({ date: x.date, label: x.label || dayjs(x.date).format('M/D') }));
       return { candidates, source: 'anthropic' };
     } catch (_) {
@@ -207,17 +207,17 @@ async function geminiExtractCandidates(query) {
       console.warn('Gemini fallback not configured (GEMINI_API_KEY missing)');
       return null;
     }
-    const prompt = `あなたは日本語のスケジューリングアシスタントです。入力文から\"明確に指定された\"候補日だけを抽出し、JSON配列のみを返してください。曖昧な場合は空配列[]を返してください。
+    const prompt = `あなたは日本語のスケジューリングアシスタントです。入力文から"明確に指定された"候補日だけを抽出し、JSON配列のみを返してください。曖昧な場合は空配列[]を返してください。
 ルール:
 - タイムゾーン: Asia/Tokyo
 - 今日: ${dayjs().format('YYYY-MM-DD')}
 - 未来寄りに解釈。ただし不確かな推測はしない（想像で補完しない）。
 - 形式: [{"date":"YYYY-MM-DD","label":"M/D(曜)"}, ...]
-- 最大10件、日付昇順。
+- 最大30件、日付昇順。
 - 出力は配列のみ。説明や余計なテキストは含めない。明確でない場合は [] を返す。
 
 リクエスト: ${query}`;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
     const resp = await axios.post(
       url,
       { contents: [{ role: 'user', parts: [{ text: prompt }] }] },
@@ -231,7 +231,7 @@ async function geminiExtractCandidates(query) {
     if (!Array.isArray(arr)) return null;
     const mapped = arr
       .filter((x) => x?.date)
-      .slice(0, 10)
+      .slice(0, 30)
       .map((x) => ({ date: x.date, label: x.label || dayjs(x.date).format('M/D') }));
     console.log('[GEMINI] extracted candidates:', mapped.length);
     return mapped;

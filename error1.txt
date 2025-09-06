@@ -1,0 +1,36 @@
+[MENTION] 2025-09-06T19:59:16.817Z group=C71531afc3f70ee851c072bcc3dbf425e user=U6b49c7fd95532a20fdad30f6372d9b0b(船橋弘暉) text="@【幹助】幹事アシスタント かれーたべいこ" query="かれーたべいこ" mentionees=[{"index":0,"length":13,"userId":"U5a082712caa8a2839e523fed6a4ff025","type":"user","isSelf":true}] BOT_USER_ID=U5a082712caa8a2839e523fed6a4ff025
+Anthropic API error; trying Gemini. Reason: {
+  type: 'error',
+  error: {
+    type: 'invalid_request_error',
+    message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'
+  },
+  request_id: 'req_011CSsjsGMxYo6JuPbQS8yfv'
+}
+[GEMINI] extracted candidates: 0
+[MENTION] 2025-09-06T19:59:27.351Z group=C71531afc3f70ee851c072bcc3dbf425e user=U6b49c7fd95532a20fdad30f6372d9b0b(船橋弘暉) text="@【幹助】幹事アシスタント 10/1-10/19" query="10/1-10/19" mentionees=[{"index":0,"length":13,"userId":"U5a082712caa8a2839e523fed6a4ff025","type":"user","isSelf":true}] BOT_USER_ID=U5a082712caa8a2839e523fed6a4ff025
+Anthropic API error; trying Gemini. Reason: {
+  type: 'error',
+  error: {
+    type: 'invalid_request_error',
+    message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'
+  },
+  request_id: 'req_011CSsjt3QcoTVkxFbJovuK3'
+}
+[GEMINI] extracted candidates: 10
+[MENTION] tool_use:update_event_candidates -> created poll aef8a57c-98ad-4380-8b1b-27e3b6d6840a with 10 candidates
+Anthropic API (continue) error; using default reply. Reason: {
+  type: 'error',
+  error: {
+    type: 'invalid_request_error',
+    message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'
+  },
+  request_id: 'req_011CSsjtZGEN9m5PFh1cgaAN'
+}
+[ShopSearch] Error: ReferenceError: haversineMeters is not defined
+    at resolveStationCenter (file:///opt/render/project/src/src/lib/shop_suggester.js:675:33)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async suggestPlacesFromNL (file:///opt/render/project/src/src/lib/shop_suggester.js:511:24)
+    at async handleTextMessage (file:///opt/render/project/src/src/lib/line.js:70:23)
+    at async Promise.all (index 0)
+    at async file:///opt/render/project/src/src/index.js:50:5

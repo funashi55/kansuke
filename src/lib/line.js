@@ -280,8 +280,7 @@ async function handlePostback({ client, db, event }) {
         await safePush(client, poll.group_id, [{ type: 'text', text: '次に、お店の希望（エリアや料理ジャンルなど）を教えてください！'}]);
         db.setPollFollowUpState(pollId, 'question_sent');
       }
-      // Ack to the user
-      await safeReply(client, replyToken, [{ type: 'text', text: '確定しました。グループに通知しました。' }]);
+      // Ack to the user (removed per user request)
     } catch (e) {
       await safeReply(client, replyToken, [{ type: 'text', text: `確定に失敗: ${e.message}` }]);
     }
