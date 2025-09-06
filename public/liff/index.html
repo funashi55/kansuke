@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>日程投票フォーム</title>
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <style>
+      body{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans JP', sans-serif; margin: 16px; }
+      .option{ display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #eee; }
+      .label{ flex: 1; }
+      .choices{ display:flex; gap:10px; }
+      .tally{ font-size: 12px; color:#666; }
+      .header{ margin-bottom: 12px; }
+      .save{ margin-top: 12px; padding: 10px 16px; background:#00c300; color:#fff; border:none; border-radius:6px; font-weight:bold; }
+      .disabled{ background:#ccc !important; }
+      .row{ margin-bottom:8px; }
+      .error{ color:#b00020; }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h3 id="title">日程投票</h3>
+      <div id="deadline" class="tally"></div>
+      <div id="user" class="tally"></div>
+    </div>
+
+    <div id="list"></div>
+
+    <button id="save" class="save">保存</button>
+    <div id="msg" class="row"></div>
+
+    <script type="module">
+      let LIFF_ID = (window.__LIFF_ID__ || '').trim();
+      function getPollId(){
+        const qs = new URLSearchParams(location.search);
+        let pid = qs.get('pollId');
+        if (!pid) {
+          const st = qs.get('liff.state');
+          if (st) {
+            try {
+              const decoded = decodeURIComponent(st);
+              // decoded may be a path like /liff/index.html?pollId=... or include fragments
+              const u = new URL(decoded, location.origin);
+              pid = new URLSearchParams(u.search).get('pollId') || pid;
+            } catch {}
+          }
+        }
+        return pid;
+      }
+      let pollId = getPollId();
+      const $list = document.getElementById('list');
+      const $msg = document.getElementById('msg');
+      const $save = document.getElementById('save');
+
+      let idToken = null;
+      let state = { options: [], tally: [], userChoices: [] };
+
+      function choiceName(n){ return n===2?'○':n===1?'△':'×'; }
+
+      function render(){
+        $list.innerHTML = '';
+        state.options.forEach(opt => {
+          const row = document.createElement('div');
+          row.className = 'option';
+          const label = document.createElement('div');
+          label.className = 'label';
+          label.textContent = opt.label;
+          const choices = document.createElement('div');
+          choices.className = 'choices';
+          [2,1,0].forEach(val => {
+            const id = `${opt.id}_${val}`;
+            const r = document.createElement('input');
+            r.type = 'radio';
+            r.name = opt.id;
+            r.value = String(val);
+            r.id = id;
+            const mine = state.userChoices.find(c => c.option_id === opt.id);
+            if (mine && String(mine.choice) === String(val)) r.checked = true;
+            const l = document.createElement('label');
+            l.htmlFor = id;
+            l.textContent = choiceName(val);
+            choices.appendChild(r);
+            choices.appendChild(l);
+          });
+          const tall = state.tally.find(t => t.option_id === opt.id) || { yes_count:0, maybe_count:0, no_count:0 };
+          const t = document.createElement('div');
+          t.className = 'tally';
+          t.textContent = `○${tall.yes_count} / △${tall.maybe_count} / ×${tall.no_count}`;
+          row.appendChild(label);
+          row.appendChild(choices);
+          row.appendChild(t);
+          $list.appendChild(row);
+        });
+      }
+
+      async function init(){
+        if (!LIFF_ID) {
+          const cfg = await fetch('/api/public-config').then(r=>r.json()).catch(()=>({}));
+          LIFF_ID = (cfg.liffId || '').trim();
+        }
+        const basicOk = /^[0-9A-Za-z_-]{10,}$/.test(LIFF_ID);
+        const looksLikeChannelId = /^\d{8,}$/.test(LIFF_ID); // ただの数字列はチャネルIDの可能性大
+        const looksLikeLiffId = /^\d{5,}-[0-9A-Za-z_-]+$/.test(LIFF_ID); // 例: 165xxxx-xxxxx
+        if (!basicOk || looksLikeChannelId || !looksLikeLiffId) {
+          document.getElementById('msg').innerHTML = 'LIFF_ID が不正です。<br>例: <code>1651234567-abCdEf</code> の形式になっているか確認し、<br>チャネルID（数字のみ）を入れていないか確認してください。';
+          return;
+        }
+        try{
+          await liff.init({ liffId: LIFF_ID});
+        }catch(e){
+          document.getElementById('msg').textContent = 'LIFF 初期化に失敗: ' + (e?.message || e);
+          return;
+        }
+        if (!liff.isInClient() && !liff.isLoggedIn()) {
+          // In external browser, perform login and redirect back to this page
+          liff.login({ redirectUri: location.href });
+          return; // will redirect
+        }
+        // After LIFF second redirect, pollId may now be directly in location.search
+        pollId = getPollId();
+        idToken = liff.getIDToken();
+        await load();
+        subscribe();
+      }
+
+      // debug表示: ?debug=1 を付けると主要情報を出力
+      (function(){
+        const dbg = new URLSearchParams(location.search).get('debug');
+        if (dbg === '1') {
+          const qs = new URLSearchParams(location.search);
+          const st = qs.get('liff.state');
+          const pre = document.createElement('pre');
+          pre.style.fontSize = '12px';
+          pre.style.color = '#666';
+          pre.textContent = [
+            `LIFF_ID=${LIFF_ID}`,
+            `href=${location.href}`,
+            `liff.state=${st || ''}`,
+          ].join('\n');
+          document.body.appendChild(pre);
+        }
+      })();
+
+      async function load(){
+        $msg.textContent = '';
+        const res = await fetch(`/api/polls/${encodeURIComponent(pollId)}`, {
+          headers: { Authorization: `Bearer ${idToken}` }
+        });
+        if (!res.ok){
+          $msg.textContent = '読み込みに失敗しました';
+          return;
+        }
+        const data = await res.json();
+        state = { options: data.options, tally: data.tally, userChoices: data.userChoices };
+        document.getElementById('title').textContent = data.poll.title;
+        const dl = document.getElementById('deadline');
+        if (data.poll.deadline){
+          const d = new Date(Number(data.poll.deadline));
+          dl.textContent = `締切: ${d.toLocaleString('ja-JP')}`;
+        } else dl.textContent = '';
+        document.getElementById('user').textContent = `あなた: ${data.user?.name || ''}`;
+        render();
+      }
+
+      $save.addEventListener('click', async () => {
+        $msg.textContent = '';
+        const inputs = Array.from(document.querySelectorAll('input[type=radio]:checked'));
+        const byOption = new Map();
+        for (const r of inputs){
+          byOption.set(r.name, Number(r.value));
+        }
+        // any not selected? treat as no change (do not send)
+        const choices = Array.from(byOption.entries()).map(([optionId, choice]) => ({ optionId, choice }));
+        $save.classList.add('disabled');
+        try{
+          const res = await fetch(`/api/polls/${encodeURIComponent(pollId)}/votes3`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              Authorization: `Bearer ${idToken}`
+            },
+            body: JSON.stringify({ choices })
+          });
+          if (!res.ok){
+            const j = await res.json().catch(()=>({}));
+            throw new Error(j.error || '送信に失敗しました');
+          }
+          const j = await res.json();
+          state.tally = j.tally || state.tally;
+          $msg.textContent = '保存しました';
+        }catch(e){
+          $msg.innerHTML = `<span class="error">${e.message}</span>`;
+        }finally{
+          $save.classList.remove('disabled');
+        }
+      });
+
+      function subscribe(){
+        const es = new EventSource(`/api/polls/${encodeURIComponent(pollId)}/stream`);
+        es.onmessage = (ev) => {
+          try{
+            const data = JSON.parse(ev.data);
+            if (data.type === 'tally'){
+              state.tally = data.tally;
+              render();
+            }
+          }catch{}
+        };
+      }
+
+      init().catch(err => {
+        $msg.textContent = 'LIFF 初期化に失敗: ' + err.message;
+      });
+    </script>
+  </body>
+  </html>

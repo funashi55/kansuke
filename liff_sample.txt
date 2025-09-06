@@ -1,0 +1,262 @@
+LINE上でアンケートを取ってみよう（LIFFフォーム機能)
+GoogleAppsScript
+GoogleSpreadSheet
+Firebase
+LINEmessagingAPI
+LIFF
+最終更新日 2022年09月09日
+投稿日 2022年09月01日
+はじめに
+聞くところによると、小学校などでは、各家庭に登校前、家で検温など健康チェックを行わせて、その内容を書いた紙を持たせて登校させるそうです。紙ベースだとお子さんの場合、ぐちゃぐちゃにしてなくすこともあるかもしれないし。。（なくしたらまた記入用紙をあげればいい…というのも環境的にやめたいところ）
+健康状態など登校前に連絡しておくことで、その日の子どもの出欠確認も含めてできるのではないかということもあり、この事前「健康観察表」を各家庭でLINE上にて連絡できるWEBアプリを作成してみました！
+
+※今回、健康観察フォームにしましたが、アンケートや予約票などにも対応できるのでタイトルでは「LINE上でアンケート」としています:point_up:
+
+これを使ってできること
+・親御さん☞LINE上で健康観察表(LIFFフォーム)を送ることができる。
+・先生☞学校でスプレッドシートに転記されていく情報をもとに子どもの健康状態を確認できる。
+
+完成形
+:large_blue_diamond:LINEで健康観察表入力➡スプレッドシートへデータ転記
+Video_Guru_20220901_101310254_AdobeExpress.gif
+:arrow_down:
+Video_Guru_20220901_095414647_AdobeExpress (1).gif
+
+作成手順
+:one: Google Apps Script(GAS)でLINE Botを動かす
+コードは:point_right_tone2:
+非エンジニアでもLINE Bot開発できる！ SpreadsheetをデータベースにGASで動かす
+を参考に作成しています。
+※「LINE Messageing API」のチャネル作成や、GASで発行されたWebhook URLのLINE BOTとの連携など、こちらに詳しく解説があります。
+
+:point_down_tone2:GASで作成したコード:point_down_tone2:
+
+「チャネルアクセストークン」「スプレッドシートID」「LIFF URL」のコピペを忘れずに
+※「LIFF URL」については:three:で確認してください
+
+code.js
+// 応答メッセージURL
+var REPLY = "https://api.line.me/v2/bot/message/reply";
+// アクセストークン
+var ACCESS_TOKEN = "チャネルアクセストークン";
+
+
+// LINEから送られてきたデータを取得 doPost()
+function doPost(e) {
+  // メッセージ受信
+  var data = JSON.parse(e.postData.contents).events[0];
+  // リプライトークン取得
+  var replyToken = data.replyToken;
+  // ユーザーのメッセージを取得
+  var userMessage = data.message.text;
+
+  // 応答メッセージの内容
+  var messages = [
+    {
+      type: "text",
+      text: "",
+    },
+  ];
+  if (userMessage === "健康観察") {
+    messages = confirmation();
+  } else if (userMessage === "いいえ") {
+    messages[0].text = "終了しました";
+  } else {
+    //メッセージを改行ごとに分割
+    var all_msg = userMessage.split(/\r\n|\n/);
+
+    //対象のスプレッドシートを取得
+    var sheet = 'xxxxxxxxxxxxxxxx';
+    var listsheet = SpreadsheetApp.openById(sheet).getSheetByName('シート1');
+    var title = ['日付', '氏名','出席番号', '体温(℃)', '症状', '家族の症状'];
+    listsheet.getRange(1, 1, 1, title.length).setValues([title]);
+    var spreadsheet = SpreadsheetApp.getActive();
+    spreadsheet.getRange('1:1').activate();
+    spreadsheet.getActiveRangeList().setHorizontalAlignment('center').setBackground('#cfe2f3');
+    //現在年月日取得
+    var date = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss')
+    //最終行取得
+    var lastRow = listsheet.getLastRow();
+
+
+    //各セルに書き込み
+    //A列に記入年月日
+    listsheet.getRange('A' + (lastRow + 1)).setValue(date);
+    //B列に入力した日付（メッセージの１行目）
+    listsheet.getRange('B' + (lastRow + 1)).setValue(all_msg[0]);
+    //C列に開始時間（メッセージの２行目）
+    listsheet.getRange('C' + (lastRow + 1)).setValue(all_msg[1]);
+    //D列に終了時間（メッセージの3行目）
+    listsheet.getRange('D' + (lastRow + 1)).setValue(all_msg[2]);
+    //E列に内容（メッセージの4行目）
+    listsheet.getRange('E' + (lastRow + 1)).setValue(all_msg[3]);
+    //F列に内容（メッセージの5行目）
+    listsheet.getRange('F' + (lastRow + 1)).setValue(all_msg[4]);
+  }
+  //lineで返答する
+  UrlFetchApp.fetch(REPLY, {
+    'headers': {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': "Bearer " + ACCESS_TOKEN
+    },
+    'method': 'post',
+    'payload': JSON.stringify({
+      'replyToken': replyToken,
+      'messages': messages,
+    }),
+  });
+  return ContentService.createTextOutput(JSON.stringify({ 'content': 'post ok' })).setMimeType(ContentService.MimeType.JSON);
+}
+
+//確認テンプレート
+function confirmation() {
+  return [
+    {
+      "type": "template",
+      "altText": "健康観察フォーム",
+      "template": {
+        "type": "confirm",
+        "text": "健康観察に入力する",
+        "actions": [
+          {
+            "type": "uri",
+            "label": "はい",
+            "uri": "（ここにLIFF URLをコピぺ）"
+          },
+          {
+            "type": "message",
+            "label": "いいえ",
+            "text": "いいえ"
+          }
+        ]
+      }
+    }
+  ]
+};
+
+:two: LIFFで健康観察表の入力フォームを作成
+【全て無料】10分でLINE BotにLIFFフォームを追加してスプレッドシートにデータを保存
+を参考に健康観察表の入力フォームを作成。
+
+:point_down_tone2::three:のステップで読み込ませる「index.html」には以下のコードをコピペ:point_down_tone2:
+
+「LIFF ID」のコピペを忘れずに
+
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>健康観察</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rossorigin="anonymous">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jqueryui/1.12.1/themes/base/jquery-ui.min.css">
+</head>
+<body>
+    <p class="text-center">【健康観察フォーム】</p>
+    <p class="text-center">毎朝6:30～7:00に記入をして、送信してください</p>
+    <form class="w-75 mx-auto">
+        <p class="mt-3">氏名（例：やまだ　たろう）</p>
+        <div>
+            <input class="form-control w-100 mt-1" name="name" required>
+        </div>
+        <p class="mt-3">出席番号</p>
+        <div>
+            <input type = "number" name="bangou" min="1" max="35" required>                                                                                                                      
+        </div>
+        <p class="mt-3">今朝の体温</p>
+        <div>
+            <input type = "number" name="temperature" step="0.1" min="33.0" max="40.0" value="36.5" required>℃                                                                                                                     
+        </div>
+        <p class="mt-3">かぜの症状（せき、のどの痛み、頭痛やだるさ、味覚・嗅覚の異常など）がある場合は記入してください</p>
+        <p class="mt-n1">※症状がなければ、「なし」と記入してください</p>
+        <div>
+            <input class="form-control w-100 mt-1" name="shushoujou" required>
+        </div>
+        <div>
+        <p class="mt-3"　required>家族に発熱などの症状のある人がいる</p>
+        <input id="radio-a" type="radio" name="family" value="はい" checked><label for="radio-a">はい</label>
+        <input id="radio-b" type="radio" name="family" value="いいえ"><label for="radio-b">いいえ</label>
+    </div>
+       
+        <input type="submit" class="mt-4 btn btn-primary" value="連絡する">
+    </form>
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jqueryui/1.12.1/jquery-ui.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js" crossorigin="anonymous"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.min.js" crossorigin="anonymous"></script>
+    <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2.1/sdk.js"></script>
+    <script>
+
+        $(document).ready(function () {
+            const liffId = "XXXXXXXXXX-XXXXXXXX";
+            initializeLiff(liffId);
+        })
+
+        function initializeLiff(liffId) {
+            liff.init({
+                liffId: liffId
+            }).then(() => {
+                initializeApp();
+            }).catch((err) => {
+                console.log('LIFF Initialization failed ', err);
+            });
+        }
+
+        function sendText(text) {
+            liff.sendMessages([{
+                'type': 'text',
+                'text': text
+            }]).then(function () {
+                liff.closeWindow();
+            }).catch(function (error) {
+                window.alert('Failed to send message ' + error);
+            });
+        }
+
+        const params = (new URL(document.location)).searchParams;
+        const key = params.get('key');
+
+        $(function () {
+            $('form').submit(function () {
+                const name    = $('input[name="name"]').val();
+                const bangou = $('input[name="bangou"]').val();
+                const temperature  = $('input[name="temperature"]').val();
+                const shushoujou  = $('input[name="shushoujou"]').val();
+                const family = $('input[name="family"]').val();
+                const msg = `${name}\n${bangou}\n${temperature}\n${shushoujou}\n${family}`;
+                sendText(msg);
+                return false;
+            });
+        });
+
+    </script>
+
+</body>
+</html>
+
+【健康観察フォーム】完成図:point_down_tone2:
+体温は、入力しやすいようにデフォルトで36.5℃にしています。
+Screenshot_20220901_101430.jpg
+
+:three:「Firebase」でWebアプリを動かす
+　:two: で作成した健康観察表入力フォーム（Webアプリ）をLINE上で動かすための
+URLを発行します。
+
+先ほどの記事、
+【全て無料】10分でLINE BotにLIFFフォームを追加してスプレッドシートにデータを保存
+ではGitHubでURL発行していますが、
+ここでは、GoogleのWebアプリ開発プラットフォーム『Firebase』で進めていくことにします。その際、以下の動画を参考にしています。:point_down_tone2:
+
+
+
+※冒頭、LIFFの作成についても解説しています。
+
+おわりに
+今回、はじめて記事を書きました。
+コーディングもQiita記事も初心者なもので
+:large_blue_diamond:コードの書き方についてのアドバイス
+:large_blue_diamond:記事の内容で分かりづらい箇所の指摘
+:large_blue_diamond:試してみたけど、動かなかった…
+などについて、コメントあればお待ちしています！
