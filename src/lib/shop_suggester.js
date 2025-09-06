@@ -606,9 +606,7 @@ async function summarizeTopWithClaude({ nl, items, model = DEFAULT_CLAUDE_MODEL,
     'reasonはユーザー入力と店舗属性（営業時間・評価・レビュー数・価格帯・ジャンル・エリア）に基づき、口語的で魅力的に。',
     JSON.stringify(payload, null, 0),
   ].join('\n');
-  if (isDebugLog()) {
-    await logLine('debug', `[llm-summarize] claude items=${items.length} nl_len=${String(nl||'').length}`);
-  }
+  
   const json = await claudeMessagesJson({ system, user, model, max_tokens: 1024, temperature: 0 });
   return json; // expect { recommendations: [ {name, image_url, google_maps_url, genres, area, reason} ] }
 }
@@ -630,9 +628,7 @@ async function summarizeTopWithGemini({ nl, items, model = DEFAULT_GEMINI_MODEL,
     language,
   };
   const user = JSON.stringify(payload, null, 0);
-  if (isDebugLog()) {
-    await logLine('debug', `[llm-summarize] gemini items=${items.length} nl_len=${String(nl||'').length}`);
-  }
+  
   const responseSchema = {
     type: 'OBJECT',
     properties: {
@@ -653,9 +649,7 @@ async function summarizeTopWithGemini({ nl, items, model = DEFAULT_GEMINI_MODEL,
     },
   };
   const json = await geminiGenerateJson({ system, user, model, maxOutputTokens: 30000, temperature: 0, responseSchema });
-  if (isDebugLog()) {
-    await logLine('debug', `[llm-summarize] gemini ok recs=${Array.isArray(json?.recommendations) ? json.recommendations.length : 0}`);
-  }
+  
   return json;
 }
 
