@@ -26,7 +26,8 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
     const sys = 'あなたは画像編集のアシスタントです。ベース画像のキャラクターの顔立ち・配色・テイストを保ちつつ、指示に沿って自然なイラストに調整してください。背景はシンプルで可読性を重視。応答は画像のみを返し、テキストは返さないでください。';
     const parts = [
       { text: `${sys}\n編集指示: ${instruction}` },
-      { inline_data: { mime_type: 'image/png', data: b64 } },
+      // REST v1betaでは camelCase inlineData/mimeType が仕様
+      { inlineData: { mimeType: 'image/png', data: b64 } },
     ];
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_IMAGE_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
     dlog('request', { model: GEMINI_IMAGE_MODEL, baseImagePath, outDir, instrLen: String(instruction||'').length, baseSize: bytes.length });
@@ -45,15 +46,15 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
     let inline = null;
     for (const c of candidates) {
       const parts = c?.content?.parts || [];
-      dlog('parts', parts.map((p) => Object.keys(p))[0]);
-      inline = parts.find((p) => p.inline_data && p.inline_data.data);
+      dlog('parts.keys', parts.map((p) => Object.keys(p)));
+      inline = parts.find((p) => (p.inlineData && p.inlineData.data) || (p.inline_data && p.inline_data.data));
       if (inline) break;
     }
     if (!inline) {
       dlog('no-inline-image', { firstCandidate: candidates[0] ? Object.keys(candidates[0]) : null, rawKeys: Object.keys(resp.data || {}) });
       return null;
     }
-    const imgB64 = inline.inline_data.data;
+    const imgB64 = inline.inlineData?.data || inline.inline_data?.data;
     ensureDir(outDir);
     const name = `kansuke_${crypto.randomUUID()}.png`;
     const outPath = path.join(outDir, name);
