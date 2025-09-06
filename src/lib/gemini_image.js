@@ -6,6 +6,8 @@ import axios from 'axios';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 // Default to the image-preview capable model per request
 const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image-preview';
+const GEMINI_DEBUG = process.env.GEMINI_DEBUG === '1';
+const dlog = (...a) => { if (GEMINI_DEBUG) console.log('[GEMINI_IMG]', ...a); };
 
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -15,6 +17,10 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
   if (!GEMINI_API_KEY) return null;
   try {
     const absBase = path.isAbsolute(baseImagePath) ? baseImagePath : path.join(process.cwd(), baseImagePath);
+    if (!fs.existsSync(absBase)) {
+      console.warn('[GEMINI_IMG] base image not found:', absBase);
+      return null;
+    }
     const bytes = fs.readFileSync(absBase);
     const b64 = bytes.toString('base64');
     const sys = 'あなたは画像編集のアシスタントです。ベース画像のキャラクターの顔立ち・配色・テイストを保ちつつ、指示に沿って自然なイラストに調整してください。背景はシンプルで可読性を重視。テキストは極力入れない。';
@@ -23,16 +29,22 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
       { inline_data: { mime_type: 'image/png', data: b64 } },
     ];
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_IMAGE_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    dlog('request', { model: GEMINI_IMAGE_MODEL, baseImagePath, outDir, instrLen: String(instruction||'').length, baseSize: bytes.length });
     const resp = await axios.post(
       url,
-      { contents: [{ role: 'user', parts }] },
-      { timeout: 30000, headers: { 'content-type': 'application/json' } }
+      {
+        contents: [{ role: 'user', parts }],
+        generationConfig: { response_mime_type: 'image/png' },
+      },
+      { timeout: 45000, headers: { 'content-type': 'application/json' } }
     );
     // Find first inline_data image in candidates
     const candidates = resp.data?.candidates || [];
+    dlog('response.candidates', { count: candidates.length });
     let inline = null;
     for (const c of candidates) {
       const parts = c?.content?.parts || [];
+      dlog('parts', parts.map((p) => Object.keys(p))[0]);
       inline = parts.find((p) => p.inline_data && p.inline_data.data);
       if (inline) break;
     }
@@ -42,9 +54,11 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
     const name = `kansuke_${crypto.randomUUID()}.png`;
     const outPath = path.join(outDir, name);
     fs.writeFileSync(outPath, Buffer.from(imgB64, 'base64'));
+    dlog('wrote', { outPath, size: Buffer.from(imgB64, 'base64').length });
     return { filename: name, path: outPath };
   } catch (e) {
-    console.warn('Gemini image generation failed:', e?.response?.data || e.message);
+    const detail = e?.response?.data || e.message;
+    console.warn('Gemini image generation failed:', detail);
     return null;
   }
 }
