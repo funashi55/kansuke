@@ -168,6 +168,7 @@ async function handlePostback({ client, db, event }) {
 
   if (data.startsWith('close:')) {
     const [, pollId, yn] = data.split(':');
+    if (process.env.DEBUG_CLOSE === '1') console.log('[CLOSE_DEBUG] postback: close', { pollId, yn });
     if (yn === 'yes') {
       // Present candidate options as a Flex with buttons to finalize
       const d = db.getPoll(pollId);
@@ -220,6 +221,7 @@ async function handlePostback({ client, db, event }) {
 
   if (data.startsWith('finalize:')) {
     const [, pollId, optionId] = data.split(':');
+    if (process.env.DEBUG_CLOSE === '1') console.log('[CLOSE_DEBUG] postback: finalize', { pollId, optionId });
     try {
       const d = db.getPoll(pollId);
       if (!d) throw new Error('poll_not_found');
