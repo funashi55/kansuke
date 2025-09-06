@@ -82,6 +82,7 @@
 
     <script type="module">
       let LIFF_ID = (window.__LIFF_ID__ || '').trim();
+      let LOGIN_CID = '';
       function getPollId(){
         const qs = new URLSearchParams(location.search);
         let pid = qs.get('pollId');
@@ -151,6 +152,12 @@
         if (!LIFF_ID) {
           const cfg = await fetch('/api/public-config').then(r=>r.json()).catch(()=>({}));
           LIFF_ID = (cfg.liffId || '').trim();
+          LOGIN_CID = (cfg.loginChannelId || '').trim();
+        } else {
+          try {
+            const cfg = await fetch('/api/public-config').then(r=>r.json());
+            LOGIN_CID = (cfg.loginChannelId || '').trim();
+          } catch {}
         }
         const basicOk = /^[0-9A-Za-z_-]{10,}$/.test(LIFF_ID);
         const looksLikeChannelId = /^\d{8,}$/.test(LIFF_ID); // ただの数字列はチャネルIDの可能性大
@@ -184,8 +191,13 @@
             return;
           } catch {}
         }
+        const decoded = liff.getDecodedIDToken?.();
         if (!idToken) {
           document.getElementById('msg').innerHTML = '<span class="error">ログイン情報の取得に失敗しました（IDトークン未取得）。LINE Loginのスコープに <code>openid</code> が含まれているか確認してください。</span>';
+          return;
+        }
+        if (decoded && LOGIN_CID && String(decoded.aud) !== String(LOGIN_CID)) {
+          document.getElementById('msg').innerHTML = `<span class="error">ログイン設定エラー: IDトークンのaud(${decoded.aud})とサーバ設定のLINE_LOGIN_CHANNEL_ID(${LOGIN_CID})が一致しません。開いているURLのドメインとLIFF設定、ログインチャネルIDをご確認ください。</span>`;
           return;
         }
         await load();

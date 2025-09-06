@@ -97,7 +97,10 @@ app.use('/liff', express.static('public/liff'));
 
 // Public config for frontend (non-sensitive)
 app.get('/api/public-config', (_req, res) => {
-  res.json({ liffId: process.env.LIFF_ID || '' });
+  res.json({
+    liffId: process.env.LIFF_ID || '',
+    loginChannelId: process.env.LINE_LOGIN_CHANNEL_ID || '',
+  });
 });
 
 // LIFF APIs
