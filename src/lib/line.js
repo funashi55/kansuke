@@ -1,6 +1,8 @@
 import dayjs from 'dayjs';
 import { runWithTools, continueAfterToolResult } from './claude.js';
 import { buildPollFlex } from './flex.js';
+import { generateEditedMascotImage, buildMascotInstruction } from './gemini_image.js';
+import path from 'path';
 import { publish } from './sse.js';
 
 function extractQueryFromText(message) {
@@ -117,6 +119,8 @@ async function handleTextMessage({ client, db, event, botUserId }) {
           finalText = cont.text || finalText;
         }
         outgoing = [{ type: 'text', text: finalText }];
+        // Try to attach a mascot image (poll created phase)
+        await maybeSendKansukeImage({ client, to: groupId, context: finalText, stage: 'poll_created' });
       }
     }
 
@@ -128,6 +132,10 @@ async function handleTextMessage({ client, db, event, botUserId }) {
 
     const messagesToSend = pollFlex ? [...outgoing, pollFlex] : outgoing;
     await safeSend(client, replyToken, groupId, messagesToSend);
+    if (!pollFlex) {
+      // Guidance only: also send an image matching the guidance
+      await maybeSendKansukeImage({ client, to: groupId, context: outgoing?.[0]?.text || '', stage: 'guidance' });
+    }
     return;
   }
 }
@@ -224,6 +232,7 @@ async function handlePostback({ client, db, event }) {
         { type: 'text', text: '締め切りの承認ありがとうございます。最終候補を選んでください。' },
         flex,
       ]);
+      await maybeSendKansukeImage({ client, to: event.source.groupId || event.source.roomId || event.source.userId, context: '締め切り承認', stage: 'closing' });
     } else {
       // no は現状スルー（再通知はしない）。
       await safeReply(client, replyToken, [{ type: 'text', text: '了解しました。引き続き投票を受け付けます。' }]);
@@ -248,6 +257,7 @@ async function handlePostback({ client, db, event }) {
       // Notify group
       if (poll.group_id) {
         await safePush(client, poll.group_id, [{ type: 'text', text }]);
+        await maybeSendKansukeImage({ client, to: poll.group_id, context: text, stage: 'finalized' });
       }
       // Ack to the user
       await safeReply(client, replyToken, [{ type: 'text', text: '確定しました。グループに通知しました。' }]);
@@ -287,6 +297,26 @@ async function safeSend(client, replyToken, groupId, messages) {
       if (to) return safePush(client, to, messages);
     }
     console.error('send failed:', data || e.message);
+  }
+}
+
+// Send mascot image if Gemini is configured and PUBLIC_BASE_URL is set
+async function maybeSendKansukeImage({ client, to, context, stage }) {
+  try {
+    const baseUrl = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
+    const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!baseUrl || !key) return;
+    const instruction = buildMascotInstruction({ context, stage });
+    const out = await generateEditedMascotImage({
+      instruction,
+      baseImagePath: 'Gemini_Generated_Image_43laaz43laaz43la.png',
+      outDir: 'public/media',
+    });
+    if (!out) return;
+    const url = `${baseUrl}/media/${encodeURIComponent(out.filename)}`;
+    await safePush(client, to, [{ type: 'image', originalContentUrl: url, previewImageUrl: url }]);
+  } catch (e) {
+    console.warn('maybeSendKansukeImage failed:', e.message);
   }
 }
 

@@ -1,0 +1,63 @@
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import axios from 'axios';
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash';
+
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+export async function generateEditedMascotImage({ instruction, baseImagePath, outDir = 'public/media' }) {
+  if (!GEMINI_API_KEY) return null;
+  try {
+    const absBase = path.isAbsolute(baseImagePath) ? baseImagePath : path.join(process.cwd(), baseImagePath);
+    const bytes = fs.readFileSync(absBase);
+    const b64 = bytes.toString('base64');
+    const sys = 'あなたは画像編集のアシスタントです。ベース画像のキャラクターの顔立ち・配色・テイストを保ちつつ、指示に沿って自然なイラストに調整してください。背景はシンプルで可読性を重視。テキストは極力入れない。';
+    const parts = [
+      { text: `${sys}\n編集指示: ${instruction}` },
+      { inline_data: { mime_type: 'image/png', data: b64 } },
+    ];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_IMAGE_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const resp = await axios.post(
+      url,
+      { contents: [{ role: 'user', parts }] },
+      { timeout: 30000, headers: { 'content-type': 'application/json' } }
+    );
+    // Find first inline_data image in candidates
+    const candidates = resp.data?.candidates || [];
+    let inline = null;
+    for (const c of candidates) {
+      const parts = c?.content?.parts || [];
+      inline = parts.find((p) => p.inline_data && p.inline_data.data);
+      if (inline) break;
+    }
+    if (!inline) return null;
+    const imgB64 = inline.inline_data.data;
+    ensureDir(outDir);
+    const name = `kansuke_${crypto.randomUUID()}.png`;
+    const outPath = path.join(outDir, name);
+    fs.writeFileSync(outPath, Buffer.from(imgB64, 'base64'));
+    return { filename: name, path: outPath };
+  } catch (e) {
+    console.warn('Gemini image generation failed:', e?.response?.data || e.message);
+    return null;
+  }
+}
+
+export function buildMascotInstruction({ context, stage }) {
+  const t = (context || '').toLowerCase();
+  const motifs = [];
+  if (/ramen|ラーメン/.test(t)) motifs.push('幹助くんがラーメンを美味しそうに食べている様子');
+  if (/寿司|すし|sushi/.test(t)) motifs.push('幹助くんが寿司を楽しそうに食べている様子');
+  if (/飲み会|乾杯|beer|ビール/.test(t)) motifs.push('幹助くんが乾杯している様子');
+  if (stage === 'finalized') motifs.push('幹助くんが笑顔でGoodのハンドサインをしている');
+  if (stage === 'poll_created' && motifs.length === 0) motifs.push('幹助くんが日程調整を案内しているポーズ');
+  if (stage === 'closing') motifs.push('幹助くんが確認OKのジェスチャーをしている');
+  if (motifs.length === 0) motifs.push('幹助くんが明るくフレンドリーに案内している');
+  return `${motifs.join('、')}。ベース画像のキャラクター性を維持して、スタンプ風の一枚絵にしてください。`;
+}
+
