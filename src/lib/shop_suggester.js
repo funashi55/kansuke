@@ -157,6 +157,40 @@ function mapGenreToTypeAndKeyword(genre) {
   return { type: 'restaurant', keyword: genre };
 }
 
+function priceLevelFromBudgetYen(minYen, maxYen) {
+  // Rough mapping for JP contexts; adjust as desired
+  if (maxYen == null && minYen == null) return null;
+  const max = Number(maxYen);
+  if (Number.isFinite(max)) {
+    if (max <= 1000) return 0; // inexpensive
+    if (max <= 3000) return 1;
+    if (max <= 6000) return 2;
+    if (max <= 12000) return 3;
+    return 4;
+  }
+  const min = Number(minYen);
+  if (Number.isFinite(min)) {
+    if (min >= 12000) return 4;
+    if (min >= 6000) return 3;
+    if (min >= 3000) return 2;
+    if (min >= 1000) return 1;
+    return 0;
+  }
+  return null;
+}
+
+// Indicative yen bands for Google price_level (rough JP mapping)
+function priceLevelIndicativeYen(priceLevel) {
+  switch (priceLevel) {
+    case 0: return { min: 0, max: 1000 };
+    case 1: return { min: 1000, max: 3000 };
+    case 2: return { min: 3000, max: 6000 };
+    case 3: return { min: 6000, max: 12000 };
+    case 4: return { min: 12000, max: 999999 };
+    default: return null;
+  }
+}
+
 // ------------------------- Validation/Sanitization --------- 
 function sanitizeNLPlan(raw) {
   const out = {
