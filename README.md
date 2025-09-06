@@ -1,147 +1,102 @@
-# LINE 日程調整デモ (Claude + SQLite + ngrok)
+# LINEグループ幹事アシスタントボット
 
-自由形式のコメント (例: 「8月の土日」) を LINE グループで Bot にメンションすると、Claude が会話文を作成しつつ、Function Calling で候補日が確定したタイミングで状態を更新→アンケートを自動作成します。投票はポストバックで受け取り、SQLite に保存・集計します。
+LINEグループでの面倒な「日程調整」から「お店探し」までを、AIが対話形式でアシストしてくれるボットです。
 
-注: LINE のネイティブ「投票」機能は Messaging API から直接は作成できないため、このリポジトリでは Flex メッセージ + Postback で擬似アンケートを実装しています。
+## 主な機能
 
-## 必要なもの (あなたがやること)
+- **AIによる日程調整**:
+  - 「@ボット 来週の土日、または再来週の平日で都合良い日ある？」のように、グループでボトにメンションするだけで、AIが候補日を抽出します。
+  - 抽出された候補日で、LIFFアプリを使った投票フォームを自動でグループに投稿します。
+  - メンバーはLIFF上で「○△×」を選ぶだけで簡単に出欠を回答でき、結果はリアルタイムで集計・共有されます。
 
-- LINE Developers で Messaging API チャネルを作成
-  - チャネルアクセストークン (長期) と チャネルシークレット を取得
-  - 「グループへの参加を許可」をオン
-  - Webhook を「利用する」に設定 (URL は後で ngrok URL を設定)
-- Bot を対象のグループに招待
-- Claude API キー (Anthropic) を取得 https://console.anthropic.com/
-- ngrok のインストール https://ngrok.com/
-- Node.js 18+ (推奨) の用意
+- **AIによる飲食店推薦**:
+  - 日程が確定すると、ボットが自動で「お店はどうしますか？」と質問します。
+  - 「@ボット 渋谷で個室のある居酒屋」のように希望を伝えると、AIが意図を汲み取り、Google Places APIを利用して最適なお店を5店舗提案します。
+  - 提案されたお店は、写真、評価、おすすめ理由付きのカード形式（Flex Message）で表示され、すぐにGoogleマップで確認できます。
+  - 確定した日程の営業時間を考慮して提案するため、「お店が閉まっていた」という事態を防ぎます。
+
+## 必要なもの
+
+- **Node.js**: v18以上
+- **LINE Developersアカウント**:
+  - Messaging APIチャネル
+  - LINE Loginチャネル（LIFFでユーザー情報を取得するために利用）
+- **ngrok**: ローカル環境で開発・テストを行う際に、外部（LINEプラットフォーム）からのWebhookを受け取るために使用します。
+- **APIキー**:
+  - **Claude APIキー**: 日程調整やお店の希望を解釈するために使用します。(https://console.anthropic.com/)
+  - **Gemini APIキー**: Claudeが利用できない際の代替として、またお店の推薦理由を生成するために使用します。(https://aistudio.google.com/app/apikey)
+  - **Google Maps APIキー**: 飲食店情報の検索に必要です。以下のAPIを有効にしてください。
+    - Places API
+    - Geocoding API
 
 ## セットアップ
 
-1) 依存関係のインストール
+1.  **リポジトリをクローン**
+    ```bash
+    git clone <repository_url>
+    cd kansuke
+    ```
 
-```
-npm i
-```
+2.  **依存関係のインストール**
+    ```bash
+    npm install
+    ```
 
-2) 環境変数ファイルの作成
+3.  **環境変数の設定**
+    `.env.example`ファイルをコピーして`.env`ファイルを作成します。
+    ```bash
+    cp .env.example .env
+    ```
+    作成した`.env`ファイルに、以下の各値を設定してください。
 
-`.env.example` を `.env` にコピーし、各値を設定します。
+    - `LINE_CHANNEL_ACCESS_TOKEN`: Messaging APIのチャネルアクセストークン。
+    - `LINE_CHANNEL_SECRET`: Messaging APIのチャネルシークレット。
+    - `ANTHROPIC_API_KEY`: ClaudeのAPIキー。
+    - `GEMINI_API_KEY`: GeminiのAPIキー。
+    - `GOOGLE_MAPS_API_KEY`: Google Maps PlatformのAPIキー。
+    - `LIFF_ID`: 作成したLIFFアプリのID。
+    - `LINE_LOGIN_CHANNEL_ID`: LIFFアプリで利用するLINE LoginチャネルのチャネルID。
+    - `BOT_USER_ID` (任意): ボット自身のユーザーID。設定すると、メンションされた場合のみ反応するようになり、より厳密な制御が可能です。
+    - `ADMIN_SECRET` (任意): 管理者用APIを保護するためのシークレットキー。
 
-```
-cp .env.example .env
-```
+## 実行方法
 
-必須:
-- `LINE_CHANNEL_ACCESS_TOKEN`
-- `LINE_CHANNEL_SECRET`
-- `ANTHROPIC_API_KEY` (無くても動きますが、候補日抽出は簡易ロジックになります)
+1.  **ローカルサーバーの起動**
+    ```bash
+    npm run dev
+    ```
+    サーバーが `http://localhost:3000` で起動します。
 
-任意:
-- `BOT_USER_ID` (メンション検出を厳密化。ボットの userId を設定すると、メンション時のみ起動できます)
-- `PORT` (デフォルト 3000)
-- `DB_PATH` (デフォルト `./data/app.sqlite`)
+2.  **ngrokでWebhookを公開**
+    別のターミナルを開き、以下のコマンドでローカルサーバーを外部に公開します。
+    ```bash
+    ngrok http 3000
+    ```
+    表示された`Forwarding`のURL（`https://xxxx-xxxx.ngrok-free.app`のような形式）をコピーします。
 
-3) ローカル起動
+3.  **LINE Developersコンソールの設定**
+    - Messaging APIチャネルの「Webhook設定」で、Webhook URLに `(コピーしたngrokのURL)/webhook` を設定します。
+    - LIFFアプリのエンドポイントURLに、`(コピーしたngrokのURL)/liff/index.html` を設定します。
 
-```
-npm run dev
-```
+## 使い方
 
-4) ngrok で公開 (別ターミナル)
+1.  作成したボットをLINEグループに招待します。
+2.  **日程調整**: `@ボット 来週の土日で` のように、ボットにメンションして日程の希望を伝えます。
+3.  ボットが候補日を記載した投票フォームを投稿します。
+4.  「フォームで回答」ボタンからLIFFアプリを開き、各候補日に○△×で回答します。
+5.  全員が回答すると、ボットが締め切りを促します。「はい」を選ぶと、最も票が多かった日を確定できます。
+6.  **飲食店検索**: 日程が確定すると、ボットが「次に、お店の希望（エリアや料理ジャンルなど）を教えてください！」と尋ねます。
+7.  `@ボット 渋谷で焼肉` のように希望を伝えると、おすすめのお店の情報がカード形式で投稿されます。
 
-```
-ngrok http 3000
-```
+## プロジェクト構成
 
-表示された https の Forwarding URL を LINE の Webhook URL に設定します。例: `https://xxxx-xx-xx-xx.ngrok-free.app/webhook`
-
-5) 動作確認
-
-- Bot をグループに追加
-- グループで Bot をメンションし、自由形式で送信:
-  - 例: `@ボット 8月の土日`
-- Bot が候補日を解析し、投票用 Flex メッセージを投稿
-- いずれかの候補「投票」ボタンを押すと、投票が記録され、直後に集計が返信されます
-  （集計はLIFF内で確認できます。Flexにはデフォルトで「フォームで回答」のみ表示します）
-
-## 仕組み概要
-
-- `src/index.js`: Express + LINE webhook 受け口
-- `src/lib/line.js`: イベントハンドラ (メッセージ/ポストバック)
-- `src/lib/claude.js`: Claude とのやり取り（通常抽出＋Function Calling）。API キーが無い場合は週末候補の簡易生成。
-- `src/lib/db.js`: SQLite スキーマと投票ロジック
-- `src/lib/flex.js`: 投票用 Flex メッセージ生成
-  - セッション状態: `sessions`, `session_candidates`（メンションで開始→Claude のツール呼び出しで候補を保存→投票作成）
-- `src/lib/auth.js`: LIFF IDトークン検証（LINE Loginのverifyエンドポイント）
-- `src/lib/sse.js`: リアルタイム更新用のシンプルなSSEチャンネル
-- `public/liff/index.html`: 参加者用のLIFFフォーム（○/△/× 投票 + リアルタイム集計）
-
-DB スキーマ:
-- polls(id, group_id, title, created_at, status)
-- options(id, poll_id, label, date)
-- votes(poll_id, option_id, user_id, user_name, voted_at)
-
-単一選択の投票（ポストバック）に加えて、LIFF フォームでは各候補に対して ○/△/× を独立に投票できます。
-LIFF の投票は `votes3` テーブルに保存され、集計は ○/△/× で表示されます。Flex の「投票」ボタンは簡易に「○」として記録されます。
-
-## LIFF での投票（調整さん風のUI）
-
-- LIFF 準備:
-  - LINE Developers → LIFF → 新規作成
-  - エンドポイントURL: `https://<あなたの公開URL>/liff/index.html`
-  - 取得した `LIFF_ID` を `.env` に設定
-  - LIFFはLINE Loginチャネルを前提とするため、そのチャネルIDを `.env` の `LINE_LOGIN_CHANNEL_ID` に設定
-  - 開発中は `SKIP_OIDC_VERIFY=1` で検証をスキップ可能（本番不可）
-
-- 使い方:
-  - Flexメッセージに「フォームで回答」ボタンが表示されます（`LIFF_ID` を設定した場合）
-  - 押下すると LIFF 内のフォームが開き、各日付に対して ○/△/× を選んで「保存」
-  - 同時に開いている他ユーザーの画面には SSE によるリアルタイム集計が反映されます
-  - 締切（deadline）以降はサーバ側で更新を拒否します
-
-- API（フロントエンドから呼ばれます）
-  - `GET /api/polls/:pollId`（要 Authorization: Bearer <LIFFのIDトークン>）
-  - `POST /api/polls/:pollId/votes3`（choices: [{ optionId, choice(0|1|2) }])
-  - `GET /api/polls/:pollId/stream`（SSE）
-
-- 管理（任意）
-  - `POST /api/polls/:pollId/deadline` で締切設定（ヘッダ `Authorization: Bearer <ADMIN_SECRET>` 必須）
-  - `.env` の `ADMIN_SECRET` を設定
-
-### メンション時の挙動（会話 + Function Calling）
-- メンションを含むメッセージはすべて Claude に渡します。
-- Claude は自然な返信文を作成し、候補日が確定できる場合のみ `update_event_candidates` ツールを呼び出します。
-- ツール入力で受け取った候補日をセッションへ保存し、直ちに投票を作成してグループへ投稿します（返信文 + Flex の2通）。
-- ツールが呼ばれなかった場合は、従来の抽出ロジックで候補を推定して投票を作成します。
-
-## 本番運用 (Cloud Run + Cloud SQL)
-
-ローカルは SQLite で十分ですが、本番は Cloud SQL (PostgreSQL か MySQL) を推奨します。移行の考え方:
-
-- このコードでは DB アクセスを `db` オブジェクトのメソッドに集約しています。
-- 本番用に Cloud SQL のクライアント (例: `pg` や `mysql2`) を使った `db` 実装を別ファイルで用意し、`initDB()` の差し替えで対応可能です。
-- Cloud Run から Cloud SQL へは Cloud SQL Auth Proxy を使うか、サーバレス接続を構成します。
-
-大まかな手順:
-1. Cloud SQL インスタンス作成 (PostgreSQL 推奨)。
-2. データベース/スキーマ作成 (polls/options/votes を同様に用意)。
-3. Cloud Run サービスを作成し、環境変数と接続情報 (インスタンス接続名) を設定。
-4. `initDB()` を Postgres 実装に置換 (後で追加実装可能)。
-5. https エンドポイントを LINE の Webhook に設定。
-
-セキュリティ:
-- アクセストークン/シークレット/API キーは必ず Secret Manager などで管理。
-- Cloud Run の最小インスタンス数 0/1、同時実行などは負荷と用途で調整。
-
-## 制限・注意事項
-
-- LINE メッセージは編集できないため、投票結果の確認はLIFF内のリアルタイム集計で行います。
-- Claude の応答が JSON 以外を返す場合、フォールバックで週末候補を提示します。
-- Flex のボタン数に上限があるため、候補は最大 10 件に制限しています。
-
-## よくあるトラブル
-
-- 署名検証エラーで 401: `LINE_CHANNEL_SECRET` が不一致の可能性。
-- Webhook が 200 以外: ngrok 側 URL 誤りやローカル停止。
-- メンションで反応しない: ボットの userId 取得に失敗している可能性。起動ログに `[BOOT] Resolved botUserId:` が出ているか確認。環境で取得できない場合は `.env` の `BOT_USER_ID` を設定してください（メンションは「ボット宛て」のみ反応）。
-# kansuke
+- `src/index.js`: Expressサーバーのメインファイル。WebhookやAPIエンドポイントの定義。
+- `src/lib/line.js`: LINEイベント（メッセージ、ポストバック）のメインハンドラ。
+- `src/lib/claude.js`: LLM (Claude/Gemini) と連携し、自然言語から日程候補を抽出するロジック。
+- `src/lib/shop_suggester.js`: 自然言語から飲食店の検索条件を抽出し、Google Places APIで検索して候補を返すロジック。
+- `src/lib/db.js`: データベース (SQLite) のスキーマ定義と操作ロジック。
+- `src/lib/flex.js`: 日程調整や飲食店推薦で使うFlex Messageを生成する。
+- `src/lib/auth.js`: LIFFのIDトークンを検証する認証ロジック。
+- `public/liff/index.html`: 日程調整の投票を行うLIFFアプリのフロントエンド。
+- `.env.example`: 環境変数のテンプレートファイル。
+- `README.md`: このファイル。
