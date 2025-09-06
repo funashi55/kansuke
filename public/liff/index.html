@@ -165,14 +165,29 @@
           document.getElementById('msg').textContent = 'LIFF 初期化に失敗: ' + (e?.message || e);
           return;
         }
+        // Ensure login with openid scope when outside client
+        const u = new URL(location.href);
+        const retried = u.searchParams.get('relogin') === '1';
         if (!liff.isInClient() && !liff.isLoggedIn()) {
-          // In external browser, perform login and redirect back to this page
-          liff.login({ redirectUri: location.href });
+          u.searchParams.set('relogin', '1');
+          liff.login({ scope: ['openid','profile'], prompt: 'consent', redirectUri: u.toString() });
           return; // will redirect
         }
         // After LIFF second redirect, pollId may now be directly in location.search
         pollId = getPollId();
         idToken = liff.getIDToken();
+        // Some environments may not issue ID token unless openid scope was granted
+        if (!idToken && !retried) {
+          u.searchParams.set('relogin', '1');
+          try {
+            liff.login({ scope: ['openid','profile'], prompt: 'consent', redirectUri: u.toString() });
+            return;
+          } catch {}
+        }
+        if (!idToken) {
+          document.getElementById('msg').innerHTML = '<span class="error">ログイン情報の取得に失敗しました（IDトークン未取得）。LINE Loginのスコープに <code>openid</code> が含まれているか確認してください。</span>';
+          return;
+        }
         await load();
         subscribe();
       }
@@ -201,7 +216,26 @@
           headers: { Authorization: `Bearer ${idToken}` }
         });
         if (!res.ok){
-          $msg.textContent = '読み込みに失敗しました';
+          let detail = '';
+          try{
+            const j = await res.json();
+            detail = (j && (j.detail || j.error)) || '';
+          }catch{}
+          if (res.status === 401){
+            const btn = document.createElement('button');
+            btn.className = 'save';
+            btn.textContent = '再ログイン';
+            btn.onclick = () => {
+              const u = new URL(location.href);
+              u.searchParams.set('relogin', '1');
+              try{ liff.login({ scope: ['openid','profile'], prompt: 'consent', redirectUri: u.toString() }); }catch{}
+            };
+            $msg.innerHTML = `<span class="error">認証エラー（401）。${detail ? '詳細: '+detail : ''}</span>`;
+            $msg.appendChild(document.createElement('br'));
+            $msg.appendChild(btn);
+          } else {
+            $msg.textContent = '読み込みに失敗しました';
+          }
           return;
         }
         const data = await res.json();
