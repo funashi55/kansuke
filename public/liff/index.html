@@ -188,6 +188,8 @@
           }
           const j = await res.json();
           state.tally = j.tally || state.tally;
+          // サーバ状態（自分の前回投票）を反映するため再読み込み
+          await load();
           $msg.textContent = '保存しました';
         }catch(e){
           $msg.innerHTML = `<span class="error">${e.message}</span>`;
