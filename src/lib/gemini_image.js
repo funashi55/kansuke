@@ -23,7 +23,7 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
     }
     const bytes = fs.readFileSync(absBase);
     const b64 = bytes.toString('base64');
-    const sys = 'あなたは画像編集のアシスタントです。ベース画像のキャラクターの顔立ち・配色・テイストを保ちつつ、指示に沿って自然なイラストに調整してください。背景はシンプルで可読性を重視。テキストは極力入れない。';
+    const sys = 'あなたは画像編集のアシスタントです。ベース画像のキャラクターの顔立ち・配色・テイストを保ちつつ、指示に沿って自然なイラストに調整してください。背景はシンプルで可読性を重視。応答は画像のみを返し、テキストは返さないでください。';
     const parts = [
       { text: `${sys}\n編集指示: ${instruction}` },
       { inline_data: { mime_type: 'image/png', data: b64 } },
@@ -33,8 +33,9 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
     const resp = await axios.post(
       url,
       {
+        // For image-preview models, request image generation by sending text + base image.
+        // Do NOT set response_mime_type here (API rejects non-text types for this endpoint).
         contents: [{ role: 'user', parts }],
-        generationConfig: { response_mime_type: 'image/png' },
       },
       { timeout: 45000, headers: { 'content-type': 'application/json' } }
     );
@@ -48,7 +49,10 @@ export async function generateEditedMascotImage({ instruction, baseImagePath, ou
       inline = parts.find((p) => p.inline_data && p.inline_data.data);
       if (inline) break;
     }
-    if (!inline) return null;
+    if (!inline) {
+      dlog('no-inline-image', { firstCandidate: candidates[0] ? Object.keys(candidates[0]) : null, rawKeys: Object.keys(resp.data || {}) });
+      return null;
+    }
     const imgB64 = inline.inline_data.data;
     ensureDir(outDir);
     const name = `kansuke_${crypto.randomUUID()}.png`;
